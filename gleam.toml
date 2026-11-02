@@ -1,0 +1,7 @@
+name = "macdry"
+version = "0.1.0"
+target = "javascript"
+
+[dependencies]
+
+[dev-dependencies]

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <title>MacDry — Local diagnostics</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="#top" aria-label="MacDry home">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+        <span>macdry<span class="brand-period">.</span></span>
+      </a>
+      <p class="sidebar-label">WORKSPACE</p>
+      <nav class="side-nav" aria-label="Sections">
+        <a class="nav-link is-current" href="#overview"><span aria-hidden="true">◫</span> Overview</a>
+        <a class="nav-link" href="#guided-tests"><span aria-hidden="true">◎</span> Guided tests</a>
+        <a class="nav-link" href="#report"><span aria-hidden="true">↗</span> Export report</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="local-indicator"><span aria-hidden="true"></span> LOCAL SESSION</span>
+        <p>Your Mac, your data.<br>Nothing is uploaded by this page.</p>
+      </div>
+    </aside>
+
+    <main id="main">
+      <div id="top" class="topbar">
+        <span class="breadcrumb">MACDRY <span aria-hidden="true">/</span> DIAGNOSTICS</span>
+        <span class="topbar-local"><span aria-hidden="true"></span> Running locally</span>
+      </div>
+
+      <div class="content">
+        <section id="overview" aria-labelledby="page-title">
+          <div class="hero">
+            <div class="hero-copy">
+              <p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> A LITTLE MORE CLARITY</p>
+              <h1 id="page-title">Know your Mac<span class="title-dot">.</span></h1>
+              <p class="hero-description">A thoughtful look at your Mac, right where you are. Review local checks and try a few simple, hands-on tests.</p>
+              <a class="text-link" href="#guided-tests">Explore guided tests <span aria-hidden="true">↗</span></a>
+            </div>
+            <div class="hero-art" aria-hidden="true">
+              <div class="art-orbit orbit-outer"></div><div class="art-orbit orbit-inner"></div>
+              <div class="art-spark spark-one">✳</div><div class="art-spark spark-two">✳</div>
+              <div class="art-computer"><div class="art-screen"><span>✳</span></div><div class="art-base"></div></div>
+              <div class="art-caption">A CLOSER LOOK <span>✦</span></div>
+            </div>
+          </div>
+
+          <div class="section-heading checks-heading">
+            <div><p class="eyebrow">01 / THE OVERVIEW</p><h2>Local checks</h2><p>Information collected by the local MacDry server.</p></div>
+            <button type="button" class="button button-secondary" id="refresh-checks">Run local checks <span aria-hidden="true">↗</span></button>
+          </div>
+          <div class="notice notice-info"><span class="notice-icon" aria-hidden="true">i</span><p><strong>Context matters.</strong> Inventory and informational checks are not a hardware health verdict. A check can only tell you what it actually measured.</p></div>
+          <p class="test-note">The session token is kept in this tab's session storage when available. It is not included in reports.</p>
+          <p id="token-storage-notice" class="checks-state is-error" role="status" hidden></p>
+          <div id="checks-state" class="checks-state" role="status" aria-live="polite">Ready when you are. Running checks asks the local server to collect system information and may run system commands.</div>
+          <div id="checks-list" class="checks-grid" aria-label="Local check results"></div>
+        </section>
+
+        <section id="guided-tests" class="guided-section" aria-labelledby="guided-title">
+          <div class="section-heading guided-heading">
+            <div><p class="eyebrow">02 / YOUR TURN</p><h2 id="guided-title">A hands-on check<span class="title-dot">.</span></h2><p>Optional, non-destructive tests. You decide what to try and whether it worked.</p></div>
+            <span class="section-tag">6 SIMPLE TESTS <span aria-hidden="true">✳</span></span>
+          </div>
+          <div class="notice notice-neutral"><span class="notice-icon" aria-hidden="true">✳</span><p><strong>Good to know.</strong> These are basic browser checks, not a complete diagnosis. Intensive stress tests are not included in v1. Browser and macOS permissions may be required.</p></div>
+
+          <div class="test-grid">
+            <article class="test-card" data-test="keyboard">
+              <div class="test-top"><span class="test-icon icon-peach" aria-hidden="true">⌨</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Keyboard</h3><p>Focus the test area and press keys. Only the last physical key code is displayed; typed text is not shown, and key codes are not saved or exported.</p>
+              <button type="button" class="button button-secondary" data-action="start-keyboard">Start keyboard test</button>
+              <div class="test-workspace" id="keyboard-workspace" hidden>
+                <div id="keyboard-area" class="interaction-area keyboard-area" tabindex="0" role="group" aria-label="Keyboard test area. Focus here and press keys."><span aria-hidden="true">⌨</span><strong>Focus here and press a key</strong><span id="keyboard-feedback">Waiting for a keydown in this area.</span></div>
+                <button type="button" class="button button-quiet" data-action="stop-keyboard">Stop test</button>
+              </div>
+              <p class="test-note">Only keydown events in the focused area are observed. macOS or the browser may intercept some keys. Codes describe physical positions and may not match labels or the selected keyboard layout; this cannot verify every key or detect mechanical faults.</p>
+              <div class="feedback" aria-label="Keyboard test result"><span>Did it work?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+
+            <article class="test-card" data-test="pointer">
+              <div class="test-top"><span class="test-icon icon-lilac" aria-hidden="true">↖</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Trackpad &amp; pointer</h3><p>Move and click in the area, then scroll inside it. The browser cannot reliably distinguish a trackpad from other pointers.</p>
+              <button type="button" class="button button-secondary" data-action="start-pointer">Start pointer test</button>
+              <div class="test-workspace" id="pointer-workspace" hidden>
+                <div id="pointer-area" class="interaction-area pointer-area" tabindex="0" role="region" aria-label="Pointer test area. Move, click and scroll inside this area."><div class="pointer-content"><strong>Move, click &amp; scroll here</strong><span>Scroll down within this area.</span><span aria-hidden="true">↓</span><span>You've reached the bottom.</span></div></div>
+                <p id="pointer-feedback" class="live-feedback">Move: waiting · Click: waiting · Scroll: waiting</p>
+                <button type="button" class="button button-quiet" data-action="stop-pointer">Stop test</button>
+              </div>
+              <p class="test-note">Events show browser input only; they do not prove which device produced it.</p>
+              <div class="feedback" aria-label="Pointer test result"><span>Did it work?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+
+            <article class="test-card" data-test="camera">
+              <div class="test-top"><span class="test-icon icon-blue" aria-hidden="true">◉</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Camera</h3><p>With your permission, view a live local preview. No photos or video are saved or uploaded.</p>
+              <div class="actions"><button type="button" class="button button-secondary" data-action="start-camera">Start camera</button><button type="button" class="button button-quiet" data-action="stop-camera" disabled>Stop</button></div>
+              <div class="test-workspace" id="camera-workspace" hidden><video id="camera-preview" autoplay playsinline muted aria-label="Live camera preview"></video></div>
+              <p class="test-note" id="camera-message" role="status">Requires browser and macOS camera permission.</p>
+              <div class="feedback" aria-label="Camera test result"><span>Can you see the preview?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+
+            <article class="test-card" data-test="microphone">
+              <div class="test-top"><span class="test-icon icon-mint" aria-hidden="true">◖</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Microphone</h3><p>With your permission, watch the input level as you speak. Audio is not recorded, played back, saved or uploaded.</p>
+              <div class="actions"><button type="button" class="button button-secondary" data-action="start-microphone">Start microphone</button><button type="button" class="button button-quiet" data-action="stop-microphone" disabled>Stop</button></div>
+              <div class="test-workspace" id="microphone-workspace" hidden><label for="microphone-level">Input level</label><meter id="microphone-level" min="0" max="100" value="0">0%</meter><span class="meter-hint">Speak near your microphone and look for movement.</span></div>
+              <p class="test-note" id="microphone-message" role="status">Requires browser and macOS microphone permission.</p>
+              <div class="feedback" aria-label="Microphone test result"><span>Did the level respond?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+
+            <article class="test-card" data-test="audio">
+              <div class="test-top"><span class="test-icon icon-yellow" aria-hidden="true">♫</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Audio output</h3><p>Play two short tones: left, then right. Turn down your volume first and check your output device.</p>
+              <div class="actions"><button type="button" class="button button-secondary" data-action="start-audio">Play tones</button><button type="button" class="button button-quiet" data-action="stop-audio" disabled>Stop</button></div>
+              <p class="test-note" id="audio-message" role="status">Stereo routing depends on your output device and settings.</p>
+              <div class="feedback" aria-label="Audio output test result"><span>Did you hear both sides?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+
+            <article class="test-card" data-test="gpu">
+              <div class="test-top"><span class="test-icon icon-coral" aria-hidden="true">▧</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Graphics</h3><p>Create a WebGL context and look for colored blocks. This is a visual check, not a GPU stress test.</p>
+              <div class="actions"><button type="button" class="button button-secondary" data-action="start-gpu">Start graphics test</button><button type="button" class="button button-quiet" data-action="stop-gpu" disabled>Stop</button></div>
+              <div class="test-workspace" id="gpu-workspace" hidden><canvas id="gpu-canvas" width="480" height="160" role="img" aria-label="Graphics test: three colored blocks, coral, cream and teal"></canvas></div>
+              <p class="test-note" id="gpu-message" role="status">WebGL availability depends on your browser and graphics settings.</p>
+              <div class="feedback" aria-label="Graphics test result"><span>Can you see three blocks?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="report" class="report-section" aria-labelledby="report-title">
+          <div class="report-art" aria-hidden="true">↗</div>
+          <div class="report-copy"><p class="eyebrow">03 / KEEP A COPY</p><h2 id="report-title">Take your findings with you.</h2><p>Download a JSON report containing the date, local checks and guided test results. No identifiers are added, but server-provided checks may contain sensitive details. Review before sharing.</p></div>
+          <button type="button" class="button button-dark" id="export-report">Download report <span aria-hidden="true">↓</span></button>
+        </section>
+        <footer><span>MACDRY <span class="brand-period">✳</span> LOCAL DIAGNOSTICS</span><span>Made for a closer look, not a final verdict.</span></footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
