@@ -62,7 +62,8 @@ async function run(path, args, timeout) {
 }
 
 function integer(value) {
-  const raw = String(value ?? "").trim();
+  if (typeof value !== "string" && typeof value !== "number") return -1;
+  const raw = String(value).trim();
   if (!/^\d+$/.test(raw)) return -1;
   const n = Number(raw);
   return Number.isSafeInteger(n) ? n : -1;
@@ -88,6 +89,7 @@ export function normalise(results) {
   simple("cpu", results.cpu, label);
   simple("cores", results.cores, integer);
   simple("memory_bytes", results.memory, integer);
+  simple("memory_pressure_level", results.pressure ?? {}, integer);
 
   let profile;
   try {
@@ -116,6 +118,38 @@ export function normalise(results) {
     if (cycles >= 0) facts.battery_cycles = cycles;
   }
   if (!facts.battery_condition) facts.battery_condition_issue = profileIssue;
+
+  const chargeEntries = power.filter((entry) => Object.hasOwn(entry ?? {}, "sppower_battery_charge_info"));
+  const chargerEntries = power.filter((entry) => Object.hasOwn(entry ?? {}, "sppower_battery_charger_connected"));
+  const bool = (v) => v === true || v === "TRUE" ? 1 : v === false || v === "FALSE" ? 0 : -1;
+  const charge = chargeEntries.length === 1 ? chargeEntries[0].sppower_battery_charge_info : null;
+  if (charge && typeof charge === "object" && !Array.isArray(charge)) {
+    const percent = integer(charge.sppower_battery_state_of_charge);
+    if (percent >= 0 && percent <= 100) facts.battery_charge_percent = percent;
+    const charging = bool(charge.sppower_battery_is_charging);
+    if (charging >= 0) facts.battery_charging = charging;
+  }
+  if (chargerEntries.length === 1) {
+    const charger = chargerEntries[0];
+    const connected = bool(charger.sppower_battery_charger_connected);
+    if (connected >= 0) facts.charger_connected = connected;
+    if (Object.hasOwn(charger, "sppower_battery_is_charging") &&
+      bool(charger.sppower_battery_is_charging) !== facts.battery_charging) {
+      delete facts.battery_charging;
+    }
+  }
+  facts.battery_power_issue = profileIssue;
+
+  const thermalResult = results.thermal ?? {};
+  const thermalLines = thermalResult.value?.split(/\r?\n/).filter((line) => /Thermal Warning Level|No thermal warning level/i.test(line)) ?? [];
+  if (thermalLines.length === 1) {
+    const match = /^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} )?Thermal Warning Level = (\d+)$/.exec(thermalLines[0].trim());
+    if (match) {
+      const level = integer(match[1]);
+      if (level >= 0) facts.thermal_warning_level = level;
+    }
+  }
+  if (facts.thermal_warning_level === undefined) facts.thermal_warning_level_issue = thermalResult.error || missing;
 
   const nvmeResult = results.nvme ?? {};
   let nvme;
@@ -166,7 +200,7 @@ export function normalise(results) {
 }
 
 export async function collectFacts() {
-  const [macos, model, cpu, cores, memory, disk, profile, nvme] = await Promise.all([
+  const [macos, model, cpu, cores, memory, disk, profile, nvme, pressure, thermal] = await Promise.all([
     run("/usr/bin/sw_vers", ["-productVersion"], SHORT_TIMEOUT),
     run("/usr/sbin/sysctl", ["-n", "hw.model"], SHORT_TIMEOUT),
     run("/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string"], SHORT_TIMEOUT),
@@ -175,6 +209,8 @@ export async function collectFacts() {
     run("/bin/df", ["-k", "/System/Volumes/Data"], SHORT_TIMEOUT),
     run("/usr/sbin/system_profiler", ["-json", "SPDisplaysDataType", "SPPowerDataType"], PROFILER_TIMEOUT),
     run("/usr/sbin/system_profiler", ["-json", "SPNVMeDataType"], PROFILER_TIMEOUT),
+    run("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], SHORT_TIMEOUT),
+    run("/usr/bin/pmset", ["-g", "therm"], SHORT_TIMEOUT),
   ]);
-  return normalise({ macos, model, cpu, cores, memory, disk, profile, nvme });
+  return normalise({ macos, model, cpu, cores, memory, disk, profile, nvme, pressure, thermal });
 }

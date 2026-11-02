@@ -15,7 +15,7 @@ MacDry is an offline, non-destructive first-pass diagnostic for Apple Silicon Ma
 
 The server listens on an ephemeral port on `127.0.0.1` only. It validates `Host` and cross-origin requests, exposes no arbitrary command endpoint, and requires a random session token in an API request header. The token is passed in the URL fragment, removed from the address bar and retained in tab-scoped session storage when available. Keep the printed URL private. The server stops with its Terminal process.
 
-No network service is contacted by the application. Browser camera and microphone access requires explicit user action and OS/browser permission; streams stop on request or when the page is hidden. No media is saved. The export contains the filtered check results and user-marked test outcomes, not raw system command output, keystrokes or device identifiers. Review a report before sharing: hardware model and other information can still be sensitive.
+No network service is contacted by the application. Browser camera and microphone access requires explicit user action and OS/browser permission; streams stop on request or when the page is hidden. No media is saved. The versioned JSON export contains allowlisted fields from known checks, their recommendations and user-marked test outcomes, not raw system command output, keystrokes or device identifiers. Unknown checks are anonymized. Review a report before sharing: hardware model and other information can still be sensitive.
 
 ## Diagnostic semantics
 
@@ -23,6 +23,9 @@ No network service is contacted by the application. Browser camera and microphon
 - `warning` means a specific reported condition needs attention; it is not proof of a root cause.
 - `unavailable` means the input could not be obtained or interpreted.
 - Guided tests are `not-tested`, `pass`, `fail` or `unavailable`; pass/fail reflects the user's answer, not automatic fault isolation.
+- The report's `checks_state` distinguishes `not-run`, `loading`, `unavailable` and `complete`. `checks: null` means no completed response; an empty list means the response contained no checks.
+
+System-wide memory pressure is read once through the private `kern.memorystatus_vm_pressure_level` sysctl; unsupported or unrecognised values remain unavailable. Battery charge and charger connection are sampled from system-profiler data, without treating a connected but not charging state as a fault. Thermal warning levels come from `pmset -g therm` and are not temperatures; a missing or unrecognised level is unavailable. These observations do not test hardware health. The thermal parser's numeric branches are tested using fixtures, not a real warning on every supported macOS version.
 
 The initial version does not stress-test CPU, memory, GPU or storage. It does not repair hardware, find the physical location of liquid damage, or replace Apple Diagnostics and professional inspection. SMART `Verified` is only a reported signal. APFS space and battery information are also observations, not component tests.
 

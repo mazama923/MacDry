@@ -307,6 +307,113 @@ test("API failures and stale responses cannot show misleading results", async ()
   await page.eval("__test.pendingRequests[0]({status: 200, data: {checks: []}})");
   await flush();
   assert.equal(await page.eval("document.querySelectorAll('.check-card').length"), 1);
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /Informational: 1/);
+  await page.eval("document.querySelector('#export-report').click()");
+  const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
+  assert.equal(report.checks_state, "complete");
+  assert.equal(report.checks.length, 1);
+  assert.equal(report.checks[0].status, "info");
+}));
+
+test("summary separates check and human response states and displays recommendations safely", async () => usingPage({}, async (page) => {
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /not run yet/i);
+  assert.match(await page.eval("document.querySelector('#summary-tests').textContent"), /Not tested: 6 · Unavailable: 0/);
+  const checks = [
+    { id: "storage", status: "warning", title: "Storage", summary: "Almost full", details: "90% used", source: "df", recommendation: "Review space <img src=x onerror=alert(1)>" },
+    { id: "smart", status: "fail", title: "SMART", recommendation: "Back up data" },
+    { id: "memory", status: "info", title: "Memory" },
+    { id: "battery", status: "unavailable", title: "Battery" },
+    { id: "other", status: "future", title: "Other" },
+  ];
+  await page.eval(`__test.responses.push({status: 200, data: {checks: ${JSON.stringify(checks)}}}); document.querySelector('#refresh-checks').click()`);
+  await page.wait("document.querySelectorAll('.check-card').length === 5");
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /Anomalies: 1 · Alerts: 1 · Informational: 1 · Unavailable: 1 · Unknown: 1/);
+  const cards = await page.eval("Array.from(document.querySelectorAll('.check-card'), card => ({badge: card.querySelector('.check-badge').textContent, recommendation: card.querySelector('.check-recommendation').textContent, details: card.querySelector('details')?.textContent, source: card.querySelector('.check-source')?.textContent, images: card.querySelectorAll('img').length}))");
+  assert.deepEqual(cards.map((card) => card.badge), ["Alert", "Anomaly", "Informational", "Unavailable", "Unknown"]);
+  assert.match(cards[0].recommendation, /Review space <img/);
+  assert.match(cards[0].details, /90% used/);
+  assert.equal(cards[0].source, "Source: df");
+  assert.equal(cards[0].images, 0);
+  assert.match(cards[2].recommendation, /does not establish hardware health/);
+  await page.eval("document.querySelector('[data-action=start-keyboard]').click(); document.querySelector('[data-test=keyboard] [data-feedback=pass]').click(); document.querySelector('[data-action=start-pointer]').click(); document.querySelector('[data-test=pointer] [data-feedback=fail]').click(); __test.graphicsAvailable = false; document.querySelector('[data-action=start-gpu]').click()");
+  assert.match(await page.eval("document.querySelector('#summary-tests').textContent"), /Human pass: 1 · Human fail: 1 · Not tested: 3 · Unavailable: 1/);
+  assert.match(await page.eval("document.querySelector('[data-test=gpu] .test-guidance').textContent"), /graphics settings/);
+  assert.match(await page.eval("document.querySelector('[data-test=keyboard] .test-guidance').textContent"), /human response.*not proof/i);
+  assert.match(await page.eval("document.querySelector('.summary-limit').textContent"), /human responses, not proof/i);
+  await page.eval("document.querySelector('#export-report').click()");
+  const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
+  assert.deepEqual(report.summary.checks, { fail: 1, warning: 1, info: 1, unavailable: 1, unknown: 1 });
+  assert.deepEqual(report.summary.tests, { "not-tested": 3, pass: 1, fail: 1, unavailable: 1 });
+  assert.deepEqual(report.checks.map(({ id, status }) => ({ id, status })), [
+    { id: "storage", status: "warning" }, { id: "smart", status: "fail" }, { id: "memory", status: "info" },
+    { id: "battery", status: "unavailable" }, { id: "other-5", status: "unknown" },
+  ]);
+  assert.equal(report.checks[0].recommendation, checks[0].recommendation);
+  assert.equal(report.checks[1].recommendation, checks[1].recommendation);
+  assert.match(report.checks[2].recommendation, /does not establish hardware health/);
+  assert.equal(report.checks[2].summary, null);
+  assert.deepEqual(report.checks[4], { id: "other-5", status: "unknown", recommendation: "Review the source and retry the local check; an unavailable or unknown result is not a diagnosis." });
+  assert.match(report.tests.find((item) => item.id === "gpu").recommendation, /graphics settings/);
+  assert.match(report.tests.find((item) => item.id === "pointer").recommendation, /Repeat/);
+  assert.match(report.limitations, /human responses.*not proof/i);
+}));
+
+test("summary and report distinguish not-run, loading, complete and unavailable checks", async () => usingPage({}, async (page) => {
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /not run yet/i);
+  await page.eval("document.querySelector('#export-report').click(); __test.responses.push({deferred: true}); document.querySelector('#refresh-checks').click()");
+  await page.wait("__test.pendingRequests.length === 1");
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /loading local checks/i);
+  await page.eval("document.querySelector('#export-report').click(); __test.pendingRequests[0]({status: 200, data: {checks: []}})");
+  await page.wait("document.querySelector('#checks-state').textContent.includes('no checks')");
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /complete:.*no checks returned/i);
+  await page.eval("document.querySelector('#export-report').click(); __test.responses.push({deferred: true}); document.querySelector('#refresh-checks').click()");
+  await page.wait("__test.pendingRequests.length === 2");
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /loading local checks/i);
+  await page.eval("__test.pendingRequests[1]({status: 503})");
+  await page.wait("document.querySelector('#checks-state').textContent.includes('HTTP 503')");
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /local checks are unavailable/i);
+  await page.eval("document.querySelector('#export-report').click()");
+  const reports = await page.eval("Promise.all(__test.blobs.map(async blob => JSON.parse(await blob.text())))");
+  assert.deepEqual(reports.map((report) => report.checks_state), ["not-run", "loading", "complete", "unavailable"]);
+  assert.deepEqual(reports.map((report) => report.checks), [null, null, [], null]);
+  assert.deepEqual(reports.map((report) => report.summary.checks), [null, null, { fail: 0, warning: 0, info: 0, unavailable: 0, unknown: 0 }, null]);
+}));
+
+test("missing token leaves checks not-run until an attempted run becomes unavailable", async () => usingPage({ storageBlocked: true, hash: "" }, async (page) => {
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /not run yet.*session token/i);
+  assert.match(await page.eval("document.querySelector('#checks-state').textContent"), /no session token/i);
+  await page.eval("document.querySelector('#export-report').click(); document.querySelector('#refresh-checks').click(); document.querySelector('#export-report').click()");
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /local checks are unavailable/i);
+  const reports = await page.eval("Promise.all(__test.blobs.map(async blob => JSON.parse(await blob.text())))");
+  assert.deepEqual(reports.map((report) => report.checks_state), ["not-run", "unavailable"]);
+  assert.ok(reports.every((report) => report.checks === null && report.summary.checks === null));
+  assert.equal(await page.eval("__test.requests.length"), 0);
+}));
+
+test("stale successes and failures do not change loading or unavailable state", async () => usingPage({}, async (page) => {
+  await page.eval("__test.responses.push({deferred: true}, {deferred: true}); document.querySelector('#refresh-checks').click(); document.querySelector('#refresh-checks').click()");
+  await page.wait("__test.pendingRequests.length === 2");
+  await page.eval(`__test.pendingRequests[0]({status: 200, data: {checks: [${JSON.stringify(check)}]}})`);
+  await flush();
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /loading local checks/i);
+  assert.equal(await page.eval("document.querySelectorAll('.check-card').length"), 0);
+  await page.eval("document.querySelector('#export-report').click(); __test.pendingRequests[1]({status: 503})");
+  await page.wait("document.querySelector('#checks-state').textContent.includes('HTTP 503')");
+  await page.eval("__test.responses.push({deferred: true}, {status: 503}); document.querySelector('#refresh-checks').click(); document.querySelector('#refresh-checks').click()");
+  await page.wait("__test.pendingRequests.length === 3 && document.querySelector('#checks-state').textContent.includes('HTTP 503')");
+  await page.eval(`__test.pendingRequests[2]({status: 200, data: {checks: [${JSON.stringify(check)}]}})`);
+  await flush();
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /local checks are unavailable/i);
+  assert.equal(await page.eval("document.querySelectorAll('.check-card').length"), 0);
+  await page.eval("__test.responses.push({deferred: true}, {status: 200, data: {checks: []}}); document.querySelector('#refresh-checks').click(); document.querySelector('#refresh-checks').click()");
+  await page.wait("__test.pendingRequests.length === 4 && document.querySelector('#checks-state').textContent.includes('no checks')");
+  await page.eval("__test.pendingRequests[3]({reject: 'offline'})");
+  await flush();
+  assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /complete:.*no checks returned/i);
+  await page.eval("document.querySelector('#export-report').click()");
+  const reports = await page.eval("Promise.all(__test.blobs.map(async blob => JSON.parse(await blob.text())))");
+  assert.deepEqual(reports.map((report) => report.checks_state), ["loading", "complete"]);
+  assert.deepEqual(reports.map((report) => report.checks), [null, []]);
 }));
 
 test("keyboard displays only the last physical code while active and focused", async () => usingPage({}, async (page) => {
@@ -436,27 +543,76 @@ test("audio and graphics need user confirmation and handle unavailable WebGL", a
   assert.equal(await page.eval("document.querySelector('#gpu-workspace').hidden"), false);
 }));
 
-test("export before checks preserves their unavailable state without making requests", async () => usingPage({}, async (page) => {
+test("export before checks preserves their not-run state without making requests", async () => usingPage({}, async (page) => {
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
+  assert.equal(report.version, 1);
+  assert.equal(report.checks_state, "not-run");
   assert.equal(report.checks, null);
-  assert.ok(report.tests.every((item) => item.status === "not-tested"));
+  assert.equal(report.summary.checks, null);
+  assert.ok(report.tests.every((item) => item.status === "not-tested" && item.recommendation));
   assert.equal(await page.eval("__test.requests.length + __test.mediaCalls.length"), 0);
 }));
 
-test("download contains only date, server checks and guided results, without token or inputs", async () => usingPage({}, async (page) => {
-  await page.eval(`__test.responses.push({status: 200, data: {checks: [${JSON.stringify(check)}]}}); document.querySelector('#refresh-checks').click()`);
-  await page.wait("document.querySelectorAll('.check-card').length === 1");
+test("export while media streams are active includes no device or media data", async () => usingPage({}, async (page) => {
+  await page.eval("document.querySelector('[data-action=start-camera]').click(); document.querySelector('[data-action=start-microphone]').click()");
+  await page.wait("!document.querySelector('#camera-workspace').hidden && !document.querySelector('#microphone-workspace').hidden");
+  await page.eval("__test.streams[0].track.label = 'PRIVATE_DEVICE_NAME'; __test.streams[0].frame = 'PRIVATE_CAMERA_FRAME'; __test.streams[1].audio = 'PRIVATE_AUDIO_DATA'; document.querySelector('[data-test=camera] [data-feedback=pass]').click(); document.querySelector('#export-report').click()");
+  const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
+  assert.equal(report.tests.find((item) => item.id === "camera").status, "pass");
+  for (const secret of ["PRIVATE_DEVICE_NAME", "PRIVATE_CAMERA_FRAME", "PRIVATE_AUDIO_DATA"]) {
+    assert.ok(!JSON.stringify(report).includes(secret));
+  }
+  assert.equal(await page.eval("__test.requests.length + __test.localStorageReads + __test.recorderCalls"), 0);
+  await page.eval("window.dispatchEvent(new Event('pagehide'))");
+  assert.equal(await page.eval("__test.streams.every(stream => stream.track.stopped)"), true);
+}));
+
+test("download preserves filtered engine observations and recommendations while excluding extra data", async () => usingPage({}, async (page) => {
+  const power = {
+    id: "battery_power", title: "Battery and power", status: "info",
+    summary: "Charge: 75%. Charger connected. Charging. ",
+    details: "Snapshot only; charge is a percentage of current full charge, not maximum capacity or battery health. Not charging while connected can be normal.",
+    source: "system_profiler SPPowerDataType",
+    recommendation: "Check Battery settings if behavior is unexpected; this is not a health test.",
+  };
+  const thermal = {
+    id: "thermal", title: "Thermal warning", status: "warning",
+    summary: "macOS reports a critical thermal warning.",
+    details: "macOS thermal warning category (unitless), not a temperature; availability and platform-specific levels vary. A snapshot cannot assess cooling or hardware health.",
+    source: "pmset -g therm",
+    recommendation: "Save work, stop activity and let the Mac cool; seek service if it persists.",
+  };
+  const pressure = {
+    id: "memory_pressure", title: "Memory pressure", status: "warning",
+    summary: "macOS reports elevated memory pressure.",
+    details: "macOS system-wide pressure category (unitless), sampled once; it is not a memory hardware test. This private interface may change.",
+    source: "sysctl kern.memorystatus_vm_pressure_level",
+    recommendation: "Close unnecessary apps and check Memory Pressure in Activity Monitor.",
+  };
+  const incoming = [
+    { ...power, extra: "PRIVATE_DEVICE", serial: "PRIVATE_SERIAL", token, nested: { camera: "PRIVATE_CAMERA_DATA" } },
+    { ...thermal, audio: "PRIVATE_MICROPHONE_DATA" }, pressure,
+    { id: "unknown-PRIVATE_DEVICE", status: "future", title: "PRIVATE_DEVICE", summary: "PRIVATE_SERIAL", recommendation: "PRIVATE_CAMERA_DATA" },
+    { id: "battery", status: "future", title: null, summary: { secret: "PRIVATE_SERIAL" }, details: ["PRIVATE_CAMERA_DATA"], source: token, recommendation: null },
+  ];
+  await page.eval(`__test.responses.push({status: 200, data: {checks: ${JSON.stringify(incoming)}}}); document.querySelector('#refresh-checks').click()`);
+  await page.wait("document.querySelectorAll('.check-card').length === 5");
   await page.eval(`document.querySelector('[data-action=start-keyboard]').click(); document.querySelector('#keyboard-area').dispatchEvent(new KeyboardEvent('keydown', {key: 'PRIVATE_KEY', code: 'NumpadAdd'})); document.querySelector('[data-test=keyboard] [data-feedback=pass]').click(); __test.mediaModes.push('denied'); document.querySelector('[data-action=start-camera]').click()`);
   assert.equal(await page.eval("document.querySelector('#keyboard-feedback').textContent"), "Last physical key: NumpadAdd");
   await page.wait("document.querySelector('[data-test=camera] [data-result]').dataset.status === 'unavailable'");
   assert.equal(await page.eval("__test.downloads.length"), 0);
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
-  assert.deepEqual(Object.keys(report), ["date", "checks", "tests"]);
+  assert.deepEqual(Object.keys(report), ["version", "date", "limitations", "summary", "checks_state", "checks", "tests"]);
+  assert.equal(report.checks_state, "complete");
+  assert.equal(report.version, 1);
   assert.ok(!Number.isNaN(Date.parse(report.date)));
-  assert.deepEqual(report.checks, [check]);
-  assert.deepEqual(report.tests, [
+  assert.deepEqual(report.checks.slice(0, 3), [power, thermal, pressure]);
+  assert.deepEqual(report.checks[3], { id: "other-4", status: "unknown", recommendation: "Review the source and retry the local check; an unavailable or unknown result is not a diagnosis." });
+  assert.deepEqual(report.checks[4], { id: "battery", title: null, status: "unknown", summary: null, details: null, source: "[redacted]", recommendation: "Review the source and retry the local check; an unavailable or unknown result is not a diagnosis." });
+  assert.match(await page.eval("document.querySelector('#report .report-copy p:last-child').textContent"), /filtered local observations.*review the file before sharing/i);
+  assert.deepEqual(report.tests.map(({ id, status }) => ({ id, status })), [
     { id: "keyboard", status: "pass" }, { id: "pointer", status: "not-tested" },
     { id: "camera", status: "unavailable" }, { id: "microphone", status: "not-tested" },
     { id: "audio", status: "not-tested" }, { id: "gpu", status: "not-tested" },
@@ -464,6 +620,9 @@ test("download contains only date, server checks and guided results, without tok
   assert.ok(!JSON.stringify(report).includes(token));
   assert.ok(!JSON.stringify(report).includes("PRIVATE_KEY"));
   assert.ok(!JSON.stringify(report).includes("NumpadAdd"));
+  for (const secret of ["PRIVATE_DEVICE", "PRIVATE_SERIAL", "PRIVATE_CAMERA_DATA", "PRIVATE_MICROPHONE_DATA"]) {
+    assert.ok(!JSON.stringify(report).includes(secret));
+  }
   assert.deepEqual(await page.eval("__test.downloads"), [{ href: "blob:mock-1", filename: "macdry-report.json" }]);
   await page.wait("__test.revoked.includes('blob:mock-1')");
   assert.equal(await page.eval("__test.requests.length"), 1);

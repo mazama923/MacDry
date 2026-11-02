@@ -5,11 +5,14 @@ MacDry is an offline, first-pass diagnostic for Apple Silicon Macs, including ma
 ## What the first version checks
 
 - macOS version, model, CPU, memory and GPU inventory; available Data volume space.
-- macOS-reported battery condition, capacity and cycle count when available, and NVMe SMART status when macOS reports it.
+- macOS-reported battery condition, maximum capacity and cycle count; current battery charge and charger connection when available; and NVMe SMART status when macOS reports it.
+- A single system-wide memory-pressure observation and macOS thermal warning level when available. Memory pressure uses a private macOS interface that can change; a thermal warning level is not a temperature. Missing or unsupported values are unavailable, not normal.
 - Guided checks for keyboard input, pointer movement and scrolling, camera preview, microphone level, left/right audio and WebGL rendering. Guided results are confirmed by the user.
-- Local JSON report download. Review the report before sharing: even filtered system information can be sensitive.
+- A session summary and local JSON report with filtered observations, recommendations and human responses. Review the report before sharing: even filtered system information can be sensitive.
 
-Inventory is not a health test. A SMART `Verified` status does not rule out SSD failure. macOS and browsers may not expose every signal on every model. An unavailable check is not a pass. CPU, memory, GPU and storage stress tests are **not included**; there are no destructive or write-heavy tests.
+Inventory, memory pressure, charger status and thermal warning levels are not hardware health tests. A SMART `Verified` status does not rule out SSD failure. macOS and browsers may not expose every signal on every model. An unavailable check is not a pass. CPU, memory, GPU and storage stress tests are **not included**; there are no destructive or write-heavy tests.
+
+The versioned JSON report distinguishes checks that are `not-run`, `loading`, `unavailable` or `complete`. It includes the source and recommendation for each known check and the status of each guided test. A guided pass or fail records a human response to a limited test, not a component diagnosis. This is a new report format; consumers of the earlier unversioned report must update their parsing.
 
 ## Run the standalone executable
 

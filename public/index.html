@@ -59,6 +59,14 @@
           <div class="notice notice-info"><span class="notice-icon" aria-hidden="true">i</span><p><strong>Context matters.</strong> Inventory and informational checks are not a hardware health verdict. A check can only tell you what it actually measured.</p></div>
           <p class="test-note">The session token is kept in this tab's session storage when available. It is not included in reports.</p>
           <p id="token-storage-notice" class="checks-state is-error" role="status" hidden></p>
+          <section class="summary-panel" aria-labelledby="summary-title">
+            <h3 id="summary-title">Session summary</h3>
+            <div class="summary-columns" aria-live="polite" aria-atomic="true">
+              <div><h4>Local checks</h4><p id="summary-checks"></p></div>
+              <div><h4>Guided tests</h4><p id="summary-tests"></p></div>
+            </div>
+            <p class="summary-limit">Guided results are human responses, not proof of hardware health. No result is a complete diagnosis.</p>
+          </section>
           <div id="checks-state" class="checks-state" role="status" aria-live="polite">Ready when you are. Running checks asks the local server to collect system information and may run system commands.</div>
           <div id="checks-list" class="checks-grid" aria-label="Local check results"></div>
         </section>
@@ -135,7 +143,7 @@
 
         <section id="report" class="report-section" aria-labelledby="report-title">
           <div class="report-art" aria-hidden="true">↗</div>
-          <div class="report-copy"><p class="eyebrow">03 / KEEP A COPY</p><h2 id="report-title">Take your findings with you.</h2><p>Download a JSON report containing the date, local checks and guided test results. No identifiers are added, but server-provided checks may contain sensitive details. Review before sharing.</p></div>
+          <div class="report-copy"><p class="eyebrow">03 / KEEP A COPY</p><h2 id="report-title">Take your findings with you.</h2><p>Download a versioned JSON report with filtered local observations, their recommendations and guided responses. Nothing is uploaded or stored by this page. The observations may be sensitive, so review the file before sharing.</p></div>
           <button type="button" class="button button-dark" id="export-report">Download report <span aria-hidden="true">↓</span></button>
         </section>
         <footer><span>MACDRY <span class="brand-period">✳</span> LOCAL DIAGNOSTICS</span><span>Made for a closer look, not a final verdict.</span></footer>

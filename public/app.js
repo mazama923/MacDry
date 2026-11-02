@@ -6,7 +6,10 @@
   const testIds = ["keyboard", "pointer", "camera", "microphone", "audio", "gpu"];
   const results = Object.fromEntries(testIds.map((id) => [id, "not-tested"]));
   const labels = { "not-tested": "Not tested", pass: "Pass", fail: "Fail", unavailable: "Unavailable" };
+  const checkStatuses = ["fail", "warning", "info", "unavailable", "unknown"];
+  const checkIds = new Set(["macos", "model", "cpu", "memory", "gpu", "storage", "smart", "battery", "memory_pressure", "battery_power", "thermal"]);
   let checks = null;
+  let checksState = "not-run";
   let checksRequest = 0;
   const tokenKey = "macdry-session-token";
   let token = window.location.hash.slice(1);
@@ -41,6 +44,14 @@
     $$('[data-feedback]', card(id)).forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.feedback === status));
     });
+    let guidance = $(".test-guidance", card(id));
+    if (!guidance) {
+      guidance = document.createElement("p");
+      guidance.className = "test-guidance";
+      card(id).append(guidance);
+    }
+    guidance.textContent = `Next step: ${testRecommendation(id, status)}`;
+    renderSummary();
   }
   function enableFeedback(id, enabled) {
     $$('[data-feedback]', card(id)).forEach((button) => { button.disabled = !enabled; });
@@ -81,6 +92,75 @@
     });
   });
 
+  function checkStatus(check) {
+    return checkStatuses.includes(check.status) ? check.status : "unknown";
+  }
+  function countStatuses(items, statuses, getStatus) {
+    const counts = Object.fromEntries(statuses.map((status) => [status, 0]));
+    items.forEach((item) => { counts[getStatus(item)] += 1; });
+    return counts;
+  }
+  function checkCounts() {
+    return checks === null ? null : countStatuses(checks, checkStatuses, checkStatus);
+  }
+  function testCounts() {
+    return countStatuses(testIds, Object.keys(labels), (id) => results[id]);
+  }
+  function renderSummary() {
+    const local = checkCounts();
+    const messages = {
+      "not-run": token ? "Not run yet." : "Not run yet. A session token is required to run checks.",
+      loading: "Loading local checks…",
+      unavailable: "Local checks are unavailable. Check the message below and retry."
+    };
+    $("#summary-checks").textContent = checksState === "complete"
+      ? `Complete: Anomalies: ${local.fail} · Alerts: ${local.warning} · Informational: ${local.info} · Unavailable: ${local.unavailable} · Unknown: ${local.unknown}${checks.length === 0 ? " (no checks returned)" : ""}`
+      : messages[checksState];
+    const guided = testCounts();
+    $("#summary-tests").textContent = `Human pass: ${guided.pass} · Human fail: ${guided.fail} · Not tested: ${guided["not-tested"]} · Unavailable: ${guided.unavailable}`;
+  }
+  function checkRecommendation(check) {
+    const status = checkStatus(check);
+    if (status === "unavailable" || status === "unknown") return "Review the source and retry the local check; an unavailable or unknown result is not a diagnosis.";
+    if (status === "info") return "Review what the source actually measures; information alone does not establish hardware health.";
+    if (check.id === "smart") return "Back up important data and investigate the reported SMART alert with a qualified technician.";
+    if (check.id === "battery") return "Review the battery condition in macOS and consider an authorized service assessment.";
+    if (check.id === "storage") return "Review available storage and free space if needed; this is not a disk health test.";
+    return "Review the details and source, then investigate the reported issue or consult a qualified technician.";
+  }
+  function engineRecommendation(check) {
+    return typeof check.recommendation === "string" && check.recommendation.trim()
+      ? check.recommendation : checkRecommendation(check);
+  }
+  function reportText(value) {
+    if (typeof value !== "string") return null;
+    return token ? value.replaceAll(token, "[redacted]") : value;
+  }
+  function reportCheck(check, index) {
+    if (!checkIds.has(check.id)) {
+      return { id: `other-${index + 1}`, status: checkStatus(check), recommendation: checkRecommendation(check) };
+    }
+    return {
+      id: check.id,
+      title: reportText(check.title),
+      status: checkStatus(check),
+      summary: reportText(check.summary),
+      details: reportText(check.details),
+      source: reportText(check.source),
+      recommendation: reportText(engineRecommendation(check))
+    };
+  }
+  function testRecommendation(id, status) {
+    if (status === "not-tested") return "This optional test has no human response yet; run it if relevant.";
+    if (status === "unavailable") {
+      if (id === "camera" || id === "microphone") return "Check browser and macOS permissions and device availability, then retry if desired.";
+      if (id === "gpu") return "Check browser and graphics settings, then retry if desired.";
+      if (id === "audio") return "Check browser and audio output settings, then retry if desired.";
+      return "Check browser support and retry if desired.";
+    }
+    if (status === "fail") return "Repeat the guided test and check relevant settings or seek further assessment if the issue persists.";
+    return "This records a human response to a limited test, not proof of hardware health.";
+  }
   function displayValue(value) {
     if (value == null) return "";
     return typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -97,14 +177,19 @@
       title.textContent = displayValue(check.title) || "Untitled check";
       const badge = document.createElement("span");
       badge.className = "check-badge";
-      const status = typeof check.status === "string" ? check.status : "";
-      const knownStatus = ["info", "warning", "unavailable", "fail"].includes(status);
-      badge.dataset.status = knownStatus ? status : "unavailable";
-      badge.textContent = knownStatus ? status.charAt(0).toUpperCase() + status.slice(1) : "Unknown";
+      const status = checkStatus(check);
+      badge.dataset.status = status;
+      badge.textContent = { info: "Informational", warning: "Alert", fail: "Anomaly", unavailable: "Unavailable", unknown: "Unknown" }[status];
       top.append(title, badge);
       const summary = document.createElement("p");
       summary.textContent = displayValue(check.summary) || "No summary provided.";
       item.append(top, summary);
+      const recommendation = document.createElement("p");
+      recommendation.className = "check-recommendation";
+      const recommendationLabel = document.createElement("strong");
+      recommendationLabel.textContent = "Verification: ";
+      recommendation.append(recommendationLabel, document.createTextNode(engineRecommendation(check)));
+      item.append(recommendation);
       if (check.details != null && displayValue(check.details) !== "") {
         const details = document.createElement("details");
         const heading = document.createElement("summary");
@@ -127,6 +212,8 @@
     const state = $("#checks-state");
     const request = ++checksRequest;
     checks = null;
+    checksState = token ? "loading" : "unavailable";
+    renderSummary();
     $("#checks-list").replaceChildren();
     state.classList.remove("is-error");
     if (!token) {
@@ -148,9 +235,15 @@
       if (request !== checksRequest) return;
       checks = data.checks;
       renderChecks(checks);
+      checksState = "complete";
+      renderSummary();
       state.textContent = checks.length ? `${checks.length} ${checks.length === 1 ? "check" : "checks"} returned. Select details for more context.` : "The local server returned no checks.";
     } catch (error) {
       if (request !== checksRequest) return;
+      checks = null;
+      checksState = "unavailable";
+      $("#checks-list").replaceChildren();
+      renderSummary();
       state.classList.add("is-error");
       state.textContent = error instanceof Error && /^Local server returned HTTP \d+\.$|^The local server returned an invalid checks response\.$/.test(error.message)
         ? `${error.message} Check the local server and session link, then retry.`
@@ -435,9 +528,13 @@
 
   $("#export-report").addEventListener("click", () => {
     const report = {
+      version: 1,
       date: new Date().toISOString(),
-      checks,
-      tests: testIds.map((id) => ({ id, status: results[id] }))
+      limitations: "Guided pass and fail are human responses to limited tests, not proof of hardware health. Local checks are not a complete diagnosis.",
+      summary: { checks: checkCounts(), tests: testCounts() },
+      checks_state: checksState,
+      checks: checks === null ? null : checks.map(reportCheck),
+      tests: testIds.map((id) => ({ id, status: results[id], recommendation: testRecommendation(id, results[id]) }))
     };
     const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
     const link = document.createElement("a");

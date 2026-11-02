@@ -4,9 +4,9 @@ import macdry.{type Check, type Facts}
 fn facts(scenario: String) -> Facts
 
 fn expect(check: Check, id: String, status: String) {
-  case check.id == id && check.status == status {
+  case check.id == id && check.status == status && check.recommendation != "" {
     True -> Nil
-    False -> panic as "Unexpected check or status"
+    False -> panic as "Unexpected check, status or recommendation"
   }
 }
 
@@ -17,9 +17,50 @@ fn expect_summary(check: Check, expected: String) {
   }
 }
 
+fn expect_recommendations(checks: List(Check)) {
+  case checks {
+    [] -> Nil
+    [check, ..rest] -> {
+      case check.recommendation != "" {
+        True -> Nil
+        False -> panic as "Missing recommendation"
+      }
+      expect_recommendations(rest)
+    }
+  }
+}
+
+fn expect_new_checks(scenarios: List(#(String, String, String, String))) {
+  case scenarios {
+    [] -> Nil
+    [#(scenario, pressure_status, power_status, thermal_status), ..rest] -> {
+      let checks = macdry.checks(facts(scenario))
+      let assert [_, _, _, _, _, _, _, _, pressure, power, thermal] = checks
+      expect(pressure, "memory_pressure", pressure_status)
+      expect(power, "battery_power", power_status)
+      expect(thermal, "thermal", thermal_status)
+      expect_recommendations(checks)
+      expect_new_checks(rest)
+    }
+  }
+}
+
 pub fn main() {
-  let assert [macos, model, cpu, memory, gpu, storage, smart, battery] =
-    macdry.checks(facts("normal"))
+  let normal_checks = macdry.checks(facts("normal"))
+  let assert [
+    macos,
+    model,
+    cpu,
+    memory,
+    gpu,
+    storage,
+    smart,
+    battery,
+    pressure,
+    power,
+    thermal,
+  ] = normal_checks
+  expect_recommendations(normal_checks)
   expect(macos, "macos", "info")
   expect(model, "model", "info")
   expect(cpu, "cpu", "info")
@@ -34,9 +75,14 @@ pub fn main() {
     "macOS reports SMART status Verified for all reported NVMe devices.",
   )
   expect(battery, "battery", "info")
+  expect(pressure, "memory_pressure", "info")
+  expect(power, "battery_power", "info")
+  expect_summary(power, "Charge: 75%. Charger connected. Charging. ")
+  expect(thermal, "thermal", "info")
 
-  let assert [_, _, _, _, _, storage, smart, battery] =
-    macdry.checks(facts("warning"))
+  let warning_checks = macdry.checks(facts("warning"))
+  let assert [_, _, _, _, _, storage, smart, battery, _, _, _] = warning_checks
+  expect_recommendations(warning_checks)
   expect(storage, "storage", "warning")
   expect(smart, "smart", "warning")
   expect_summary(
@@ -45,19 +91,22 @@ pub fn main() {
   )
   expect(battery, "battery", "warning")
 
-  let assert [_, _, _, _, _, storage, smart, battery] =
-    macdry.checks(facts("unknown"))
+  let unknown_checks = macdry.checks(facts("unknown"))
+  let assert [_, _, _, _, _, storage, smart, battery, _, _, _] = unknown_checks
+  expect_recommendations(unknown_checks)
   expect(storage, "storage", "unavailable")
   expect(smart, "smart", "unavailable")
   expect(battery, "battery", "unavailable")
 
-  let assert [_, _, _, _, _, _, smart, _] =
+  let assert [_, _, _, _, _, _, smart, _, _, _, _] =
     macdry.checks(facts("smart_failed_with_unknown"))
   expect(smart, "smart", "warning")
-  let assert [_, _, _, _, _, _, smart, _] = macdry.checks(facts("smart_absent"))
+  let assert [_, _, _, _, _, _, smart, _, _, _, _] =
+    macdry.checks(facts("smart_absent"))
   expect(smart, "smart", "unavailable")
 
-  let assert [_, _, cpu, _, _, _, _, _] = macdry.checks(facts("cpu_partial"))
+  let assert [_, _, cpu, _, _, _, _, _, _, _, _] =
+    macdry.checks(facts("cpu_partial"))
   expect(cpu, "cpu", "info")
   expect_summary(cpu, "10 logical CPUs")
   case
@@ -68,8 +117,21 @@ pub fn main() {
     False -> panic as "Missing partial CPU error"
   }
 
-  let assert [macos, model, cpu, memory, gpu, storage, smart, battery] =
-    macdry.checks(facts("empty"))
+  let empty_checks = macdry.checks(facts("empty"))
+  let assert [
+    macos,
+    model,
+    cpu,
+    memory,
+    gpu,
+    storage,
+    smart,
+    battery,
+    pressure,
+    power,
+    thermal,
+  ] = empty_checks
+  expect_recommendations(empty_checks)
   expect(macos, "macos", "unavailable")
   expect(model, "model", "unavailable")
   expect(cpu, "cpu", "unavailable")
@@ -78,4 +140,24 @@ pub fn main() {
   expect(storage, "storage", "unavailable")
   expect(smart, "smart", "unavailable")
   expect(battery, "battery", "unavailable")
+  expect(pressure, "memory_pressure", "unavailable")
+  expect(power, "battery_power", "unavailable")
+  expect(thermal, "thermal", "unavailable")
+
+  expect_new_checks([
+    #("pressure_2", "warning", "info", "info"),
+    #("pressure_4", "warning", "info", "info"),
+    #("pressure_unknown", "unavailable", "info", "info"),
+    #("thermal_5", "info", "info", "unavailable"),
+    #("thermal_10", "info", "info", "warning"),
+    #("thermal_100", "info", "info", "warning"),
+    #("thermal_unknown", "info", "info", "unavailable"),
+    #("power_empty", "info", "info", "info"),
+    #("power_full", "info", "info", "info"),
+    #("power_partial", "info", "unavailable", "info"),
+    #("power_invalid", "info", "unavailable", "info"),
+    #("power_conflict", "info", "unavailable", "info"),
+    #("power_unknown_charging", "info", "unavailable", "info"),
+    #("power_unknown_connection", "info", "unavailable", "info"),
+  ])
 }

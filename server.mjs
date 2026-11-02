@@ -65,14 +65,15 @@ function usage() {
   console.log(`MacDry — local macOS Apple Silicon diagnostics
 
 Build: gleam build --target javascript
-Run:   deno run --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/open server.mjs
-Pack:  deno compile --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/open --include public --output macdry server.mjs
+Run:   deno run --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open server.mjs
+Pack:  deno compile --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open --include public --output macdry server.mjs
 
 Run the binary, then open the printed URL if the browser did not open.
 Use --no-open to skip opening the browser. The URL fragment is a secret.
 Press Ctrl+C to stop the server. No data is sent externally.
 Inventory is not a hardware health test. Storage warns at 90% usage;
-battery condition is reported by macOS and may be unavailable.`);
+battery condition and power are reported by macOS and may be unavailable.
+Memory pressure and thermal levels are snapshots, not hardware health tests.`);
 }
 
 async function main() {

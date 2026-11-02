@@ -2,7 +2,7 @@ function assert(value, message) {
   if (!value) throw new Error(message);
 }
 
-const runPermissions = "--allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/open";
+const runPermissions = "--allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open";
 const sandbox = await Deno.makeTempDir({ dir: "test", prefix: "integration-" });
 try {
   await Deno.mkdir(`${sandbox}/public`, { recursive: true });
@@ -66,11 +66,12 @@ try {
       const response = await fetch(url + "api/checks", { headers: { "x-macdry-token": token } });
       assert(response.status === 200, "Authenticated diagnostic failed");
       const data = await response.json();
-      assert(data.checks.length === 8, "Diagnostic check count mismatch");
-      for (const id of ["macos", "model", "cpu", "memory", "gpu", "storage", "smart", "battery"]) {
+      assert(data.checks.length === 11, "Diagnostic check count mismatch");
+      for (const id of ["macos", "model", "cpu", "memory", "gpu", "storage", "smart", "battery", "memory_pressure", "battery_power", "thermal"]) {
         assert(data.checks.some((check) => check.id === id), `Missing check ${id}`);
       }
       assert(data.checks.every((check) => ["info", "warning", "unavailable", "fail"].includes(check.status)), "Unknown diagnostic status");
+      assert(data.checks.every((check) => typeof check.recommendation === "string" && check.recommendation.length > 0), "Missing recommendation");
       const smart = data.checks.find((check) => check.id === "smart");
       assert(smart.source === "system_profiler SPNVMeDataType", "Unexpected SMART source");
       assert(["info", "warning", "unavailable"].includes(smart.status), "Unexpected SMART status");
