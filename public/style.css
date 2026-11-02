@@ -78,7 +78,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .notice-neutral .notice-icon { border-color: #c4af8d; }
 .summary-panel { margin-top: 1rem; padding: 1.15rem; background: #fff; border: 1px solid #dfe7d8; border-radius: 10px; }
 .summary-panel h3 { margin-bottom: .85rem; }
-.summary-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1rem; }
+.summary-columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
 .summary-columns h4 { margin: 0 0 .35rem; font-size: .8rem; }
 .summary-columns p, .summary-limit { margin: 0; color: #596558; font-size: .78rem; line-height: 1.6; overflow-wrap: anywhere; }
 .summary-limit { margin-top: .8rem; }
@@ -103,7 +103,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 [data-status="unavailable"], [data-status="blocked"], [data-status="incomplete"], [data-status="interrupted"] { background: #f0f1ee; color: #666b63; }
 [data-status="pass"], [data-status="no-anomaly-detected"] { background: #e9f2e8; color: #356840; }
 [data-status="anomaly-detected"] { background: #f9eae6; color: #a34230; }
-[data-status="running"] { background: #eaf1f3; color: #3e6470; }
+[data-status="running"], [data-status="measurement-recorded"] { background: #eaf1f3; color: #3e6470; }
 .guided-section { margin-top: 4.5rem; }
 .section-tag { color: #68836a; font-size: .63rem; font-weight: 800; letter-spacing: .1em; white-space: nowrap; }
 .section-tag span { color: #d38c6d; margin-left: .3rem; }

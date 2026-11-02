@@ -1,7 +1,7 @@
-const CPU_DURATION_MS = 8_000;
+const CPU_DURATION_MS = 14 * 60 * 1000;
 const CPU_BATCHES = 100_000;
 const CPU_EXPECTED = 900422756;
-const MEMORY_WORDS = 4 * 1024 * 1024;
+const MEMORY_WORDS = 64 * 1024 * 1024;
 const MEMORY_CHUNK_WORDS = 65_536;
 
 let active = false;
@@ -101,7 +101,7 @@ async function runMemory() {
   complete(
     "memory",
     "no-anomaly-detected",
-    "A 16 MiB memory buffer passed two write-and-verify patterns.",
+    "A 256 MiB memory sample passed two write-and-verify patterns.",
   );
 }
 

@@ -3,7 +3,13 @@
 (() => {
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
-  const testIds = ["keyboard", "pointer", "camera", "microphone", "audio", "gpu"];
+  const testIds = ["keyboard", "pointer", "camera", "microphone", "audio", "gpu", "ports", "wireless", "physical_condition"];
+  const manualTestIds = new Set(["ports", "wireless", "physical_condition"]);
+  const systemTestIds = ["filesystem", "network_quality", "logs"];
+  const activeSystemTestControllers = new Map();
+  const systemTests = Object.fromEntries(systemTestIds.map((id) => [id, {
+    status: "not-run", summary: "Not run.", details: "", source: "", metrics: {}, matches: {}
+  }]));
   const results = Object.fromEntries(testIds.map((id) => [id, "not-tested"]));
   const labels = { "not-tested": "Not tested", pass: "Pass", fail: "Fail", unavailable: "Unavailable" };
   const checkStatuses = ["fail", "warning", "info", "unavailable", "unknown"];
@@ -92,6 +98,7 @@
       button.setAttribute("aria-label", `Mark ${name} test as ${button.dataset.feedback}`);
       button.addEventListener("click", () => setResult(id, button.dataset.feedback));
     });
+    if (manualTestIds.has(id)) enableFeedback(id, true);
   });
 
   // Keep navigation within the page without reintroducing a fragment that could be mistaken for a token on reload.
@@ -134,6 +141,10 @@
       : messages[checksState];
     const guided = testCounts();
     $("#summary-tests").textContent = `Human pass: ${guided.pass} · Human fail: ${guided.fail} · Not tested: ${guided["not-tested"]} · Unavailable: ${guided.unavailable}`;
+    const completedSystemTests = systemTestIds.filter((id) => systemTests[id].status !== "not-run").length;
+    $("#summary-system-tests").textContent = completedSystemTests
+      ? `${completedSystemTests} of ${systemTestIds.length} run · ${systemTestIds.filter((id) => systemTests[id].status === "unavailable").length} unavailable`
+      : "Not run.";
     $("#summary-load-test").textContent = loadSummaryText();
   }
   function loadSummaryText() {
@@ -193,7 +204,12 @@
       if (id === "audio") return "Check browser and audio output settings, then retry if desired.";
       return "Check browser support and retry if desired.";
     }
-    if (status === "fail") return "Repeat the guided test and check relevant settings or seek further assessment if the issue persists.";
+    if (status === "fail") {
+      if (id === "physical_condition") return "Stop using or charging the Mac if the battery appears swollen, smells unusual or becomes unusually hot; do not press the case, and contact Apple or a qualified service provider.";
+      if (id === "ports") return "Check the cable and accessory on a known-good device, then seek service if a port still fails.";
+      if (id === "wireless") return "Check macOS settings and retry with a known-good network or Bluetooth accessory; this is not a hardware diagnosis.";
+      return "Repeat the guided test and check relevant settings or seek further assessment if the issue persists.";
+    }
     return "This records a human response to a limited test, not proof of hardware health.";
   }
   function displayValue(value) {
@@ -286,6 +302,130 @@
     }
   }
   $("#refresh-checks").addEventListener("click", loadChecks);
+
+  const systemTestLabels = {
+    "not-run": "Not run",
+    running: "Running",
+    "no-anomaly-detected": "No issue reported",
+    "anomaly-detected": "Issue reported",
+    warning: "Review logs",
+    "measurement-recorded": "Measurement recorded",
+    unavailable: "Unavailable",
+  };
+  const systemTestSources = {
+    filesystem: "diskutil verifyVolume /",
+    network_quality: "networkQuality -c -s -M 15",
+    logs: "macOS unified log · last 15 minutes",
+  };
+  const systemMetricLabels = {
+    download_mbps: "Download",
+    upload_mbps: "Upload",
+    base_rtt_ms: "Idle latency",
+    download_responsiveness_rpm: "Download responsiveness",
+    upload_responsiveness_rpm: "Upload responsiveness",
+  };
+  function cleanSystemResult(id, data) {
+    const allowedStatuses = new Set([
+      "no-anomaly-detected", "anomaly-detected", "warning", "measurement-recorded", "unavailable"
+    ]);
+    const result = {
+      status: allowedStatuses.has(data?.status) ? data.status : "unavailable",
+      summary: typeof data?.summary === "string" ? data.summary.slice(0, 300) : "The test returned an invalid result.",
+      details: typeof data?.details === "string" ? data.details.slice(0, 1000) : "",
+      source: systemTestSources[id],
+      metrics: {},
+      matches: {},
+    };
+    if (id === "network_quality" && data?.metrics && typeof data.metrics === "object") {
+      for (const key of Object.keys(systemMetricLabels)) {
+        const value = data.metrics[key];
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1_000_000_000) {
+          result.metrics[key] = value;
+        }
+      }
+      if (!Object.keys(result.metrics).length && result.status === "measurement-recorded") result.status = "unavailable";
+    }
+    if (id === "logs" && data?.matches && typeof data.matches === "object") {
+      for (const key of ["panic", "storage", "battery", "thermal", "sensor"]) {
+        const value = data.matches[key];
+        if (Number.isSafeInteger(value) && value >= 0 && value <= 100_000) result.matches[key] = value;
+      }
+    }
+    return result;
+  }
+  function systemResultText(id, result) {
+    const metrics = Object.entries(result.metrics).map(([key, value]) => {
+      const label = systemMetricLabels[key];
+      const unit = key.endsWith("_mbps") ? " Mbps" : key.endsWith("_ms") ? " ms" : " rpm";
+      return `${label}: ${value}${unit}`;
+    });
+    const matches = id === "logs"
+      ? Object.entries(result.matches).filter(([, value]) => value > 0).map(([key, value]) => `${key}: ${value}`)
+      : [];
+    return [result.summary, ...metrics, ...matches, result.details].filter(Boolean).join(" ");
+  }
+  function renderSystemTest(id) {
+    const result = systemTests[id];
+    const badge = $(`#${id}-result`);
+    badge.dataset.status = result.status;
+    badge.textContent = systemTestLabels[result.status] || "Unknown";
+    $(`#${id}-state`).textContent = systemResultText(id, result);
+    renderSummary();
+  }
+  async function runSystemTest(id, path, button) {
+    if (button.disabled) return;
+    if (!token) {
+      systemTests[id] = cleanSystemResult(id, { status: "unavailable", summary: "A local session token is required.", details: "Open the current MacDry session link." });
+      renderSystemTest(id);
+      return;
+    }
+    button.disabled = true;
+    const controller = new AbortController();
+    activeSystemTestControllers.set(id, controller);
+    systemTests[id] = {
+      status: "running",
+      summary: "Running the requested macOS check…",
+      details: "",
+      source: systemTestSources[id],
+      metrics: {},
+      matches: {},
+    };
+    renderSystemTest(id);
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "X-Macdry-Token": token },
+        cache: "no-store",
+        credentials: "same-origin",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error("The local test did not complete.");
+      const data = await response.json();
+      systemTests[id] = cleanSystemResult(id, data);
+    } catch {
+      systemTests[id] = cleanSystemResult(id, {
+        status: "unavailable",
+        summary: "The local test could not complete.",
+        details: "Check the local server and session link, then retry if appropriate.",
+      });
+    } finally {
+      if (activeSystemTestControllers.get(id) === controller) activeSystemTestControllers.delete(id);
+      button.disabled = id === "filesystem"
+        ? !$("#filesystem-confirmed").checked
+        : id === "network_quality" ? !$("#network-quality-confirmed").checked : false;
+      renderSystemTest(id);
+    }
+  }
+  $("#verify-volume").addEventListener("click", () => runSystemTest("filesystem", "/api/tests/filesystem", $("#verify-volume")));
+  $("#filesystem-confirmed").addEventListener("change", (event) => {
+    $("#verify-volume").disabled = !event.currentTarget.checked || activeSystemTestControllers.has("filesystem");
+  });
+  $("#network-quality-start").addEventListener("click", () => runSystemTest("network_quality", "/api/tests/network-quality", $("#network-quality-start")));
+  $("#network-quality-confirmed").addEventListener("change", (event) => {
+    $("#network-quality-start").disabled = !event.currentTarget.checked || activeSystemTestControllers.has("network_quality");
+  });
+  $("#scan-logs").addEventListener("click", () => runSystemTest("logs", "/api/tests/log-scan", $("#scan-logs")));
 
   let keyboardActive = false;
   const keyboardArea = $("#keyboard-area");
@@ -550,10 +690,12 @@
   });
   action("stop-gpu").addEventListener("click", () => stopGpu("Graphics test stopped."));
 
-  const LOAD_CPU_DURATION_MS = 8_000;
+  const LOAD_CPU_DURATION_MS = 14 * 60 * 1000;
   const LOAD_GPU_DURATION_MS = 6_000;
-  const LOAD_TEST_TIMEOUT_MS = 20_000;
+  const LOAD_TEST_TIMEOUT_MS = 15 * 60 * 1000;
+  const LOAD_MEMORY_SIZE_MIB = 256;
   const LOAD_CPU_WORKERS = 2;
+  const LOAD_SAFETY_INTERVAL_MS = 10_000;
   let loadPreflightReady = false;
   let loadThermalUnavailableAtStart = false;
   let loadGeneration = 0;
@@ -683,7 +825,8 @@
       };
       const onError = () => finish("unavailable");
       const cancel = () => finish("interrupted");
-      const timer = setTimeout(() => finish("unavailable"), type === "cpu" ? LOAD_CPU_DURATION_MS + 1_000 : 5_000);
+      const timeoutMs = type === "cpu" ? LOAD_CPU_DURATION_MS + 1_000 : type === "memory" ? 60_000 : 5_000;
+      const timer = setTimeout(() => finish("unavailable"), timeoutMs);
       loadWorkerCancellations.add(cancel);
       worker.addEventListener("message", onMessage);
       worker.addEventListener("error", onError, { once: true });
@@ -731,7 +874,7 @@
       }
     }
     loadTest.status = status;
-    loadTest.durationSeconds = loadStartedAt ? Math.min(20, Math.ceil((Date.now() - loadStartedAt) / 1000)) : null;
+    loadTest.durationSeconds = loadStartedAt ? Math.min(900, Math.ceil((Date.now() - loadStartedAt) / 1000)) : null;
     $("#load-test-message").textContent = message;
     renderLoadTest();
   }
@@ -743,7 +886,7 @@
 
   function scheduleLoadSafetyCheck(generation) {
     if (generation !== loadGeneration || loadTest.status !== "running") return;
-    loadSafetyTimer = setTimeout(() => runLoadSafetyCheck(generation), 2_500);
+    loadSafetyTimer = setTimeout(() => runLoadSafetyCheck(generation), LOAD_SAFETY_INTERVAL_MS);
   }
   async function runLoadSafetyCheck(generation) {
     if (generation !== loadGeneration || loadTest.status !== "running") return;
@@ -874,7 +1017,7 @@
     $("#load-start").disabled = true;
     $("#load-stop").disabled = false;
     $("#load-test-workspace").hidden = false;
-    $("#load-test-message").textContent = "CPU workload running on at most two workers. Stop at any time.";
+    $("#load-test-message").textContent = "A fixed CPU workload is running on at most two workers for up to 14 minutes. Stop at any time.";
     updateLoadStatus("running", "The bounded workload is running.");
     loadTimer = setTimeout(() => finishLoadTest(generation, "incomplete", "The fixed maximum duration was reached; the test stopped."), LOAD_TEST_TIMEOUT_MS);
     void runLoadSafetyCheck(generation);
@@ -893,7 +1036,7 @@
       return;
     }
     updateLoadComponent("memory", "running");
-    $("#load-test-message").textContent = "Checking a bounded 16 MiB memory buffer. Stop at any time.";
+    $("#load-test-message").textContent = `Checking a fixed ${LOAD_MEMORY_SIZE_MIB} MiB memory sample. Stop at any time; macOS may still compress or page memory.`;
     const memory = await workerPhase(loadWorkers[0], "memory", generation);
     if (generation !== loadGeneration) return;
     updateLoadComponent("memory", memory);
@@ -924,26 +1067,37 @@
     if (audioContext) stopAudio("Tones stopped because the page was hidden or closed.");
     if (gl) stopGpu("Graphics test stopped because the page was hidden or closed.");
     if (loadTest.status === "running") stopLoadTest("Stopped because the page was hidden or closed.");
+    for (const controller of activeSystemTestControllers.values()) controller.abort();
+    activeSystemTestControllers.clear();
   }
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopActiveTests(); });
   window.addEventListener("pagehide", stopActiveTests);
 
   $("#export-report").addEventListener("click", () => {
+    const completedSystemTests = systemTestIds.filter((id) => systemTests[id].status !== "not-run").length;
     const report = {
-      version: 2,
+      version: 3,
       date: new Date().toISOString(),
-      limitations: "Guided pass and fail are human responses to limited tests, not proof of hardware health. The controlled load test reports only what happened during its bounded CPU, memory and browser graphics workloads; no-anomaly-detected is not a hardware guarantee. Local checks are not a complete diagnosis.",
-      summary: { checks: checkCounts(), tests: testCounts() },
+      limitations: "Guided human responses and system checks are limited observations, not proof of hardware health. The CPU/memory/WebGL workload, filesystem verification, filtered logs and Internet quality snapshot each cover only a narrow condition. Internet testing contacts external servers only after confirmation; no raw log messages are exported.",
+      summary: {
+        checks: checkCounts(),
+        tests: testCounts(),
+        system_tests: {
+          run: completedSystemTests,
+          unavailable: systemTestIds.filter((id) => systemTests[id].status === "unavailable").length,
+        },
+      },
       checks_state: checksState,
       checks: checks === null ? null : checks.map(reportCheck),
       tests: testIds.map((id) => ({ id, status: results[id], recommendation: testRecommendation(id, results[id]) })),
+      system_tests: Object.fromEntries(systemTestIds.map((id) => [id, { ...systemTests[id] }])),
       hardware_load_test: {
         status: loadTest.status,
         started_at: loadTest.startedAt,
         duration_seconds: loadTest.durationSeconds,
         components: { ...loadTest.components },
         preflight: { ...loadTest.preflight },
-        limitations: "Preflight statuses are retained; an unavailable thermal-warning signal is not a normal reading and means MacDry cannot monitor heat. The 16 MiB memory pattern, bounded CPU calculation and WebGL workload cover only a small portion of the hardware. WebGL may use software rendering. No-anomaly-detected is not proof of hardware health."
+        limitations: "Preflight statuses are retained; an unavailable thermal-warning signal is not a normal reading and means MacDry cannot monitor heat. CPU work runs for at most 14 minutes on two workers; the 256 MiB memory sample covers only a small portion of RAM and macOS may still swap. WebGL may use software rendering. No-anomaly-detected is not proof of hardware health."
       }
     };
     const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));

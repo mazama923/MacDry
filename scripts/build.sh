@@ -17,7 +17,7 @@ deno compile \
   --no-prompt --no-remote --no-npm \
   --allow-read=public \
   --allow-net=127.0.0.1 \
-  --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open \
+  --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open,/usr/bin/osascript,/usr/bin/networkQuality,/usr/bin/log \
   --include public \
   --output dist/macdry \
   server.mjs

@@ -64,6 +64,7 @@
             <div class="summary-columns" aria-live="polite" aria-atomic="true">
               <div><h4>Local checks</h4><p id="summary-checks"></p></div>
               <div><h4>Guided tests</h4><p id="summary-tests"></p></div>
+              <div><h4>System tests</h4><p id="summary-system-tests">Not run.</p></div>
               <div><h4>Controlled load test</h4><p id="summary-load-test">Not run.</p></div>
             </div>
             <p class="summary-limit">Guided results are human responses, not proof of hardware health. A completed load test only reports what happened during that bounded run.</p>
@@ -75,9 +76,9 @@
         <section id="guided-tests" class="guided-section" aria-labelledby="guided-title">
           <div class="section-heading guided-heading">
             <div><p class="eyebrow">02 / YOUR TURN</p><h2 id="guided-title">A hands-on check<span class="title-dot">.</span></h2><p>Optional, non-destructive tests. You decide what to try and whether it worked.</p></div>
-            <span class="section-tag">6 GUIDED TESTS + 1 OPTIONAL LOAD TEST <span aria-hidden="true">✳</span></span>
+            <span class="section-tag">9 GUIDED CHECKS · 3 ON-DEMAND SYSTEM TESTS <span aria-hidden="true">✳</span></span>
           </div>
-          <div class="notice notice-neutral"><span class="notice-icon" aria-hidden="true">✳</span><p><strong>Good to know.</strong> The optional controlled load test exercises a small part of CPU, memory and the browser graphics stack. It runs only after a local preflight and your explicit confirmation; it is not a complete diagnosis.</p></div>
+          <div class="notice notice-neutral"><span class="notice-icon" aria-hidden="true">✳</span><p><strong>Good to know.</strong> Long CPU/memory, filesystem and Internet checks are separate, user-started operations. Internet quality testing contacts external servers and uses data only after your confirmation. MacDry never restarts, sleeps or wakes the Mac; none of these results certifies hardware health.</p></div>
 
           <div class="test-grid">
             <article class="test-card" data-test="keyboard">
@@ -142,10 +143,10 @@
 
             <article class="test-card load-test-card" data-load-test>
               <div class="test-top"><span class="test-icon icon-coral" aria-hidden="true">◌</span><span id="load-test-result" class="result-badge" data-status="not-run" role="status" aria-live="polite">Not run</span></div>
-              <h3>Controlled hardware load test</h3>
-              <p>Run a fixed, approximately 20-second CPU, 16 MiB memory and WebGL workload. MacDry makes no intentional file writes; macOS may manage or page memory normally. It stops if you leave this page, memory pressure becomes abnormal, a thermal warning appears, the graphics context is lost, or you stop it. If the thermal signal is unavailable from the outset, it stays marked unavailable and the checklist requires your manual confirmation.</p>
+              <h3>Controlled CPU, memory &amp; graphics test</h3>
+              <p>Run up to 14 minutes of CPU work on at most two workers, a fixed 256 MiB memory pattern sample and a short WebGL workload. Total runtime is capped at 15 minutes. MacDry makes no intentional file writes; macOS may compress or page memory. It stops if you leave this page, a safety snapshot becomes abnormal or unavailable, the graphics context is lost, the time limit is reached, or you stop it. If thermal monitoring is unavailable, the checklist requires manual confirmation and you must watch for heat or macOS warnings.</p>
               <button type="button" class="button button-secondary" id="load-preflight">Check readiness</button>
-              <p id="load-preflight-state" class="test-note" role="status">Preflight and periodic safety checks read macOS memory-pressure and thermal-warning signals. They do not read temperatures. An unavailable thermal signal is not treated as normal; the test can continue only after manual confirmation that the Mac is cool.</p>
+              <p id="load-preflight-state" class="test-note" role="status">Preflight and periodic checks read macOS memory-pressure and thermal-warning signals. They do not read temperatures, and the memory-pressure interface may vary by macOS version. An unavailable thermal signal is not a normal reading; the test can continue only after manual confirmation that the Mac is cool.</p>
               <div id="load-preflight-results" class="load-preflight-results" hidden></div>
               <label id="load-confirmation" class="load-confirmation" hidden>
                 <input type="checkbox" id="load-confirmed">
@@ -159,7 +160,54 @@
                 <canvas id="load-canvas" width="320" height="180" aria-label="WebGL workload visualization"></canvas>
               </div>
               <p id="load-test-message" class="test-note" role="status">No workload starts until the preflight succeeds and you confirm the checklist.</p>
-              <p class="test-note">Limits: this checks a small memory buffer, a bounded CPU calculation and the browser graphics stack. WebGL may use software rendering; physical GPU acceleration is not verified. A normal preflight or successful run cannot certify hardware health.</p>
+              <p class="test-note">Limits: 256 MiB is only a sample, not all RAM; macOS can still swap. The CPU calculation is not stress-ng and cannot reliably measure throttling. WebGL may use software rendering. No result certifies hardware health.</p>
+            </article>
+
+            <article class="test-card" data-system-test="filesystem">
+              <div class="test-top"><span class="test-icon icon-yellow" aria-hidden="true">▤</span><span id="filesystem-result" class="result-badge" data-status="not-run" role="status" aria-live="polite">Not run</span></div>
+              <h3>Startup volume verification</h3>
+              <p>Run Apple's read-only volume verification on <code>/</code>. It may take up to two minutes and requests administrator authorization for this command only; it does not repair the volume.</p>
+              <label class="load-confirmation"><input type="checkbox" id="filesystem-confirmed"><span>I have a current backup and want to verify the startup volume now.</span></label>
+              <button type="button" class="button button-secondary" id="verify-volume" disabled>Verify volume</button>
+              <p id="filesystem-state" class="test-note" role="status">Not run. This checks filesystem consistency, not SSD health.</p>
+            </article>
+
+            <article class="test-card" data-system-test="network_quality">
+              <div class="test-top"><span class="test-icon icon-blue" aria-hidden="true">⌁</span><span id="network_quality-result" class="result-badge" data-status="not-run" role="status" aria-live="polite">Not run</span></div>
+              <h3>Internet connection quality</h3>
+              <p>Apple's <code>networkQuality</code> measures throughput and responsiveness for up to 15 seconds. The command contacts external test servers and transfers data; results depend on your plan, Wi-Fi, VPN and other traffic.</p>
+              <label class="load-confirmation"><input type="checkbox" id="network-quality-confirmed"><span>I understand this will contact external servers and use Internet data.</span></label>
+              <button type="button" class="button button-secondary" id="network-quality-start" disabled>Run Internet test</button>
+              <p id="network_quality-state" class="test-note" role="status">No Internet traffic is generated until you confirm and start this test.</p>
+            </article>
+
+            <article class="test-card" data-system-test="logs">
+              <div class="test-top"><span class="test-icon icon-lilac" aria-hidden="true">≋</span><span id="logs-result" class="result-badge" data-status="not-run" role="status" aria-live="polite">Not run</span></div>
+              <h3>Recent system logs</h3>
+              <p>Summarise selected error/fault events from the last 15 minutes after your tests. MacDry keeps only aggregate keyword counts; it never displays, saves or exports raw log messages.</p>
+              <button type="button" class="button button-secondary" id="scan-logs">Scan recent logs</button>
+              <p id="logs-state" class="test-note" role="status">Not run. Log matches can be unrelated to hardware; no matches are not proof of health.</p>
+            </article>
+
+            <article class="test-card" data-test="ports">
+              <div class="test-top"><span class="test-icon icon-peach" aria-hidden="true">⇄</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>USB-C / Thunderbolt ports</h3>
+              <p>For each port on this Mac, try a known-good charger and cable, a data accessory, and a display if supported. Port layouts and capabilities vary by model; mark unavailable if you lack the equipment.</p>
+              <div class="feedback" aria-label="Port test result"><span>Did every tested port work?</span><button type="button" data-feedback="pass">Yes</button><button type="button" data-feedback="fail">No</button><button type="button" data-feedback="unavailable">Could not test all</button></div>
+            </article>
+
+            <article class="test-card" data-test="wireless">
+              <div class="test-top"><span class="test-icon icon-mint" aria-hidden="true">⌁</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Wi-Fi &amp; Bluetooth</h3>
+              <p>Confirm Wi-Fi stays connected to a known-good network, then connect a known-good Bluetooth accessory. The Internet quality test above measures one connection snapshot, not radio hardware health.</p>
+              <div class="feedback" aria-label="Wireless test result"><span>Did both connections work?</span><button type="button" data-feedback="pass">Yes</button><button type="button" data-feedback="fail">No</button><button type="button" data-feedback="unavailable">Could not test</button></div>
+            </article>
+
+            <article class="test-card" data-test="physical_condition">
+              <div class="test-top"><span class="test-icon icon-coral" aria-hidden="true">⌂</span><span class="result-badge" data-result>Not tested</span></div>
+              <h3>Physical condition</h3>
+              <p>Look for a raised case, uneven seams, unusual smell, liquid residue or abnormal heat. Do not press a swollen case. If you see swelling, smell something unusual or feel excessive heat, stop using or charging the Mac and seek service.</p>
+              <div class="feedback" aria-label="Physical inspection result"><span>Did you find a concerning sign?</span><button type="button" data-feedback="pass">No visible sign</button><button type="button" data-feedback="fail">Yes</button><button type="button" data-feedback="unavailable">Could not inspect</button></div>
             </article>
           </div>
         </section>

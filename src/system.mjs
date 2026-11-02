@@ -1,8 +1,14 @@
 const MAX_OUTPUT = 2 * 1024 * 1024;
+const LOG_MAX_OUTPUT = 512 * 1024;
 const SHORT_TIMEOUT = 4_000;
 const PROFILER_TIMEOUT = 20_000;
+const NETWORK_TIMEOUT = 20_000;
+const FILESYSTEM_TIMEOUT = 120_000;
+const LOG_TIMEOUT = 15_000;
+const VOLUME_VERIFY_APPLESCRIPT = 'do shell script "/usr/sbin/diskutil verifyVolume /" with administrator privileges';
+const LOG_PREDICATE = 'messageType == fault OR (messageType == error AND (eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "I/O error" OR eventMessage CONTAINS[c] "APFS" OR eventMessage CONTAINS[c] "battery" OR eventMessage CONTAINS[c] "thermal" OR eventMessage CONTAINS[c] "sensor"))';
 
-async function run(path, args, timeout) {
+async function run(path, args, timeout, maxOutput = MAX_OUTPUT, signal = undefined) {
   let child;
   try {
     child = new Deno.Command(path, {
@@ -17,10 +23,18 @@ async function run(path, args, timeout) {
 
   let timedOut = false;
   let tooLarge = false;
+  let aborted = false;
   const stop = () => {
     try { child.kill("SIGKILL"); } catch { /* The process already exited. */ }
   };
   const reader = child.stdout.getReader();
+  const abort = () => {
+    aborted = true;
+    stop();
+    reader.cancel().catch(() => {});
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   const timer = setTimeout(() => {
     timedOut = true;
     stop();
@@ -33,7 +47,7 @@ async function run(path, args, timeout) {
       const { value: chunk, done } = await reader.read();
       if (done) break;
       size += chunk.length;
-      if (size > MAX_OUTPUT) {
+      if (size > maxOutput) {
         tooLarge = true;
         stop();
         await reader.cancel();
@@ -43,6 +57,7 @@ async function run(path, args, timeout) {
     }
     const status = await child.status;
     if (timedOut) return { error: "The system command timed out." };
+    if (aborted) return { error: "The system command was interrupted." };
     if (tooLarge) return { error: "The system command produced too much data." };
     if (!status.success) return { error: "The system command failed." };
     const bytes = new Uint8Array(size);
@@ -55,8 +70,9 @@ async function run(path, args, timeout) {
   } catch {
     stop();
     await child.status.catch(() => {});
-    return { error: timedOut ? "The system command timed out." : "The system command could not be read." };
+    return { error: timedOut ? "The system command timed out." : aborted ? "The system command was interrupted." : "The system command could not be read." };
   } finally {
+    signal?.removeEventListener("abort", abort);
     clearTimeout(timer);
   }
 }
@@ -218,6 +234,159 @@ export async function collectLoadSignals() {
     run("/usr/bin/pmset", ["-g", "therm"], SHORT_TIMEOUT),
   ]);
   return normaliseLoadSignals(pressure, thermal);
+}
+
+function numericMetric(value, maximum = 1_000_000_000_000) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number >= 0 && number <= maximum ? number : null;
+}
+
+export function normaliseNetworkQuality(result) {
+  const unavailable = (reason) => ({
+    status: "unavailable",
+    summary: "The Internet quality test did not return usable measurements.",
+    details: reason || missing,
+    source: "networkQuality -c -s -M 15",
+    metrics: {},
+  });
+  if (result.value === undefined) return unavailable(result.error);
+  try {
+    const data = JSON.parse(result.value);
+    if (!data || typeof data !== "object" || Array.isArray(data) || data.error_code || data.error_domain) {
+      return unavailable(missing);
+    }
+    const metrics = {};
+    const downlink = numericMetric(data.dl_throughput);
+    const uplink = numericMetric(data.ul_throughput);
+    const latency = numericMetric(data.base_rtt, 1_000_000);
+    const downlinkResponsiveness = numericMetric(data.dl_responsiveness, 1_000_000);
+    const uplinkResponsiveness = numericMetric(data.ul_responsiveness, 1_000_000);
+    if (downlink !== null) metrics.download_mbps = Math.round(downlink / 100_000) / 10;
+    if (uplink !== null) metrics.upload_mbps = Math.round(uplink / 100_000) / 10;
+    if (latency !== null) metrics.base_rtt_ms = Math.round(latency * 10) / 10;
+    if (downlinkResponsiveness !== null) metrics.download_responsiveness_rpm = Math.round(downlinkResponsiveness);
+    if (uplinkResponsiveness !== null) metrics.upload_responsiveness_rpm = Math.round(uplinkResponsiveness);
+    if (!Object.keys(metrics).length) return unavailable(missing);
+    return {
+      status: "measurement-recorded",
+      summary: "The connection quality measurement completed; no hardware verdict is implied.",
+      details: "A short Internet-path snapshot from Apple's networkQuality tool. Results vary with the service plan, Wi-Fi, VPN, other traffic and test server. This test transfers external data.",
+      source: "networkQuality -c -s -M 15",
+      metrics,
+    };
+  } catch {
+    return unavailable(missing);
+  }
+}
+
+export async function collectNetworkQuality(signal = undefined) {
+  const result = await run(
+    "/usr/bin/networkQuality",
+    ["-c", "-s", "-M", "15"],
+    NETWORK_TIMEOUT,
+    MAX_OUTPUT,
+    signal,
+  );
+  return normaliseNetworkQuality(result);
+}
+
+export function normaliseVolumeVerification(result) {
+  const source = "diskutil verifyVolume / (macOS administrator authorization)";
+  if (typeof result.value !== "string") {
+    return {
+      status: "unavailable",
+      summary: "The startup volume verification did not complete.",
+      details: `${result.error || missing} Authorization may have been cancelled, or macOS may not expose this check. No repair was requested.`,
+      source,
+    };
+  }
+  const output = result.value.toLowerCase();
+  if (/appears to be (?:ok|valid)|file system check exit code is 0/.test(output)) {
+    return {
+      status: "no-anomaly-detected",
+      summary: "Disk Utility completed the volume verification without reporting an error.",
+      details: "This is a read-only filesystem verification snapshot, not an SSD health test or guarantee. MacDry does not repair the volume.",
+      source,
+    };
+  }
+  if (/corrupt|needs? repair|failed|error:|exit code [1-9]|not valid/.test(output)) {
+    return {
+      status: "anomaly-detected",
+      summary: "Disk Utility reported an issue during volume verification.",
+      details: "The output is intentionally not retained. Back up important data and review Disk Utility or consult a qualified technician; MacDry does not repair the volume.",
+      source,
+    };
+  }
+  return {
+    status: "unavailable",
+    summary: "The volume verification output was not recognised.",
+    details: "MacDry could not interpret the result, so it cannot report a successful verification. No repair was requested.",
+    source,
+  };
+}
+
+export async function verifyStartupVolume(signal = undefined) {
+  const result = await run(
+    "/usr/bin/osascript",
+    ["-e", VOLUME_VERIFY_APPLESCRIPT],
+    FILESYSTEM_TIMEOUT,
+    MAX_OUTPUT,
+    signal,
+  );
+  return normaliseVolumeVerification(result);
+}
+
+export function normaliseRecentLogs(result) {
+  const source = "macOS unified log · last 15 minutes · aggregate only";
+  const unavailable = (reason) => ({
+    status: "unavailable",
+    summary: "Recent system-log events could not be summarised.",
+    details: reason || missing,
+    source,
+    matches: 0,
+  });
+  if (result.value === undefined) return unavailable(result.error);
+  let entries;
+  try {
+    entries = result.value.trim() ? JSON.parse(result.value) : [];
+  } catch {
+    return unavailable(missing);
+  }
+  if (!Array.isArray(entries)) return unavailable(missing);
+  const matches = { panic: 0, storage: 0, battery: 0, thermal: 0, sensor: 0 };
+  let inspected = 0;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || typeof entry.eventMessage !== "string") continue;
+    inspected++;
+    const message = entry.eventMessage.toLowerCase();
+    if (message.includes("panic")) matches.panic++;
+    if (message.includes("i/o error") || message.includes("apfs")) matches.storage++;
+    if (message.includes("battery")) matches.battery++;
+    if (message.includes("thermal")) matches.thermal++;
+    if (message.includes("sensor")) matches.sensor++;
+  }
+  if (entries.length > 0 && inspected === 0) return unavailable(missing);
+  const total = entries.length;
+  return {
+    status: total ? "warning" : "no-anomaly-detected",
+    summary: total
+      ? `${total} filtered error or fault log entr${total === 1 ? "y" : "ies"} found.`
+      : "No matching error or fault entries were found in the selected log window.",
+    details: "The scan reports aggregate keyword counts only; log messages are not returned, saved or exported. Matches can be unrelated to hardware, and an empty window does not establish hardware health.",
+    source,
+    matches,
+  };
+}
+
+export async function collectRecentLogs(signal = undefined) {
+  const result = await run(
+    "/usr/bin/log",
+    ["show", "--last", "15m", "--style", "json", "--predicate", LOG_PREDICATE],
+    LOG_TIMEOUT,
+    LOG_MAX_OUTPUT,
+    signal,
+  );
+  return normaliseRecentLogs(result);
 }
 
 export async function collectFacts() {

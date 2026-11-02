@@ -1,5 +1,11 @@
 import { checks, load_test_eligible } from "./build/dev/javascript/macdry/macdry.mjs";
-import { collectFacts, collectLoadSignals } from "./src/system.mjs";
+import {
+  collectFacts,
+  collectLoadSignals,
+  collectNetworkQuality,
+  collectRecentLogs,
+  verifyStartupVolume,
+} from "./src/system.mjs";
 
 const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -29,9 +35,23 @@ function sameToken(actual, expected) {
   return difference === 0;
 }
 
-export function createHandler({ port, token, readAsset, scan = collectFacts, loadSignals = collectLoadSignals }) {
+export function createHandler({
+  port,
+  token,
+  readAsset,
+  scan = collectFacts,
+  loadSignals = collectLoadSignals,
+  verifyVolume = verifyStartupVolume,
+  networkQuality = collectNetworkQuality,
+  logScan = collectRecentLogs,
+}) {
   const host = `127.0.0.1:${port}`;
   const origin = `http://${host}`;
+  const explicitTests = new Map([
+    ["/api/tests/filesystem", verifyVolume],
+    ["/api/tests/network-quality", networkQuality],
+    ["/api/tests/log-scan", logScan],
+  ]);
   let pendingScan;
   return async (request) => {
     if (request.headers.get("host") !== host ||
@@ -39,8 +59,19 @@ export function createHandler({ port, token, readAsset, scan = collectFacts, loa
       request.headers.get("sec-fetch-site") === "cross-site") {
       return reply("Forbidden", 403);
     }
-    if (request.method !== "GET") return reply("Method not allowed", 405);
     const path = new URL(request.url).pathname;
+    if (path.startsWith("/api/tests/")) {
+      if (request.method !== "POST") return reply("Method not allowed", 405);
+      if (!sameToken(request.headers.get("x-macdry-token") ?? "", token)) return reply("Unauthorized", 401);
+      const test = explicitTests.get(path);
+      if (!test) return reply("Not found", 404);
+      try {
+        return reply(JSON.stringify(await test(request.signal)), 200, "application/json; charset=utf-8");
+      } catch {
+        return reply(JSON.stringify({ status: "unavailable", summary: "The requested local test could not complete." }), 200, "application/json; charset=utf-8");
+      }
+    }
+    if (request.method !== "GET") return reply("Method not allowed", 405);
     if (path === "/api/checks") {
       if (!sameToken(request.headers.get("x-macdry-token") ?? "", token)) return reply("Unauthorized", 401);
       try {
@@ -78,16 +109,17 @@ function usage() {
   console.log(`MacDry — local macOS Apple Silicon diagnostics
 
 Build: gleam build --target javascript
-Run:   deno run --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open server.mjs
-Pack:  deno compile --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open --include public --output macdry server.mjs
+Run:   deno run --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open,/usr/bin/osascript,/usr/bin/networkQuality,/usr/bin/log server.mjs
+Pack:  deno compile --no-prompt --no-remote --no-npm --allow-read=public --allow-net=127.0.0.1 --allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open,/usr/bin/osascript,/usr/bin/networkQuality,/usr/bin/log --include public --output macdry server.mjs
 
 Run the binary, then open the printed URL if the browser did not open.
 Use --no-open to skip opening the browser. The URL fragment is a secret.
-Press Ctrl+C to stop the server. No data is sent externally.
+Press Ctrl+C to stop the server. Tests are local unless you explicitly confirm the Internet quality test.
 Inventory is not a hardware health test. Storage warns at 90% usage;
 battery condition and power are reported by macOS and may be unavailable.
 Memory pressure and thermal levels are snapshots, not hardware health tests.
-The browser offers an optional, explicitly confirmed, bounded CPU/memory/WebGL workload.`);
+The browser offers an optional, explicitly confirmed, bounded CPU/memory/WebGL workload.
+Filesystem verification, log scanning and an Internet quality test run only after separate user actions. The Internet test contacts external servers and uses data.`);
 }
 
 async function main() {

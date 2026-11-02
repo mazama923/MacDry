@@ -2,7 +2,7 @@ function assert(value, message) {
   if (!value) throw new Error(message);
 }
 
-const runPermissions = "--allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open";
+const runPermissions = "--allow-run=/usr/bin/sw_vers,/usr/sbin/sysctl,/bin/df,/usr/sbin/system_profiler,/usr/bin/pmset,/usr/bin/open,/usr/bin/osascript,/usr/bin/networkQuality,/usr/bin/log";
 const sandbox = await Deno.makeTempDir({ dir: "test", prefix: "integration-" });
 try {
   await Deno.mkdir(`${sandbox}/public`, { recursive: true });
@@ -52,6 +52,7 @@ try {
       }
       assert((await fetch(url + "api/checks")).status === 401, "Missing token was accepted");
       assert((await fetch(url + "api/load-test/preflight")).status === 401, "Load-test preflight accepted a missing token");
+      assert((await fetch(url + "api/tests/network-quality", { method: "POST" })).status === 401, "Network test accepted a missing token");
       assert((await fetch(url + "api/checks", { headers: { "x-macdry-token": "b".repeat(64) } })).status === 401, "Invalid token was accepted");
       assert((await fetch(url, { headers: { origin: "http://attacker.example" } })).status === 403, "Foreign Origin was accepted");
       const port = Number(new URL(url).port);

@@ -1,5 +1,16 @@
 import { createHandler } from "../server.mjs";
-import { collectFacts, collectLoadSignals, normalise, normaliseLoadSignals } from "../src/system.mjs";
+import {
+  collectFacts,
+  collectLoadSignals,
+  collectNetworkQuality,
+  collectRecentLogs,
+  normalise,
+  normaliseLoadSignals,
+  normaliseNetworkQuality,
+  normaliseRecentLogs,
+  normaliseVolumeVerification,
+  verifyStartupVolume,
+} from "../src/system.mjs";
 
 function equal(actual, expected) {
   if (actual !== expected) throw new Error(`Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
@@ -74,6 +85,77 @@ Deno.test("normalisation filters identifiers and handles alternate or missing fi
   assert(!("thermal_warning_level" in unavailableSignals));
 });
 
+Deno.test("network, volume and log summaries keep only bounded allowlisted data", () => {
+  const network = normaliseNetworkQuality({ value: JSON.stringify({
+    dl_throughput: 98_765_432,
+    ul_throughput: 25_000_000,
+    base_rtt: 12.34,
+    dl_responsiveness: 120,
+    ul_responsiveness: 80,
+    interface_name: "PRIVATE_INTERFACE",
+  }) });
+  equal(network.status, "measurement-recorded");
+  equal(network.metrics.download_mbps, 98.8);
+  equal(network.metrics.upload_mbps, 25);
+  equal(network.metrics.base_rtt_ms, 12.3);
+  assert(!JSON.stringify(network).includes("PRIVATE_INTERFACE"));
+  equal(normaliseNetworkQuality({ value: JSON.stringify({ dl_throughput: "NaN" }) }).status, "unavailable");
+
+  equal(normaliseVolumeVerification({ value: "The volume / appears to be OK" }).status, "no-anomaly-detected");
+  equal(normaliseVolumeVerification({ value: "The volume / is corrupt and needs repair" }).status, "anomaly-detected");
+  equal(normaliseVolumeVerification({ value: "Command completed" }).status, "unavailable");
+  equal(normaliseVolumeVerification({ error: "The system command failed." }).status, "unavailable");
+
+  const logs = normaliseRecentLogs({ value: JSON.stringify([
+    { messageType: "error", eventMessage: "I/O error at PRIVATE_PATH" },
+    { messageType: "fault", eventMessage: "Battery failure PRIVATE_SERIAL" },
+  ]) });
+  equal(logs.status, "warning");
+  equal(logs.matches.storage, 1);
+  equal(logs.matches.battery, 1);
+  assert(!JSON.stringify(logs).includes("PRIVATE_PATH"));
+  assert(!JSON.stringify(logs).includes("PRIVATE_SERIAL"));
+  equal(normaliseRecentLogs({ value: "[]" }).status, "no-anomaly-detected");
+  equal(normaliseRecentLogs({ value: "not-json" }).status, "unavailable");
+});
+
+Deno.test("explicit system tests use fixed commands and bounded arguments", async () => {
+  const original = Deno.Command;
+  const calls = [];
+  const outputs = {
+    "/usr/bin/networkQuality": JSON.stringify({ dl_throughput: 12_000_000, base_rtt: 10 }),
+    "/usr/bin/osascript": "The volume / appears to be OK",
+    "/usr/bin/log": "[]",
+  };
+  Deno.Command = class {
+    constructor(path, options) { this.path = path; this.options = options; }
+    spawn() {
+      calls.push([this.path, this.options.args]);
+      equal(this.options.stdin, "null");
+      equal(this.options.stdout, "piped");
+      equal(this.options.stderr, "null");
+      const output = outputs[this.path];
+      return {
+        stdout: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(output)); controller.close(); } }),
+        status: Promise.resolve({ success: true }),
+        kill() {},
+      };
+    }
+  };
+  try {
+    equal((await collectNetworkQuality()).status, "measurement-recorded");
+    equal((await verifyStartupVolume()).status, "no-anomaly-detected");
+    equal((await collectRecentLogs()).status, "no-anomaly-detected");
+    equal(JSON.stringify(calls), JSON.stringify([
+      ["/usr/bin/networkQuality", ["-c", "-s", "-M", "15"]],
+      ["/usr/bin/osascript", ["-e", 'do shell script "/usr/sbin/diskutil verifyVolume /" with administrator privileges']],
+      ["/usr/bin/log", ["show", "--last", "15m", "--style", "json", "--predicate", 'messageType == fault OR (messageType == error AND (eventMessage CONTAINS[c] "panic" OR eventMessage CONTAINS[c] "I/O error" OR eventMessage CONTAINS[c] "APFS" OR eventMessage CONTAINS[c] "battery" OR eventMessage CONTAINS[c] "thermal" OR eventMessage CONTAINS[c] "sensor"))']],
+    ]));
+  } finally {
+    Deno.Command = original;
+  }
+});
+
 Deno.test("load-test preflight is authenticated and preserves unavailable thermal signals", async () => {
   const safeFacts = normaliseLoadSignals({ value: "1" }, { value: "Thermal Warning Level = 0" });
   const readyHandler = createHandler({ port: 12345, token, readAsset: () => "", scan: () => ({}), loadSignals: () => safeFacts });
@@ -113,6 +195,30 @@ Deno.test("load-test preflight is authenticated and preserves unavailable therma
   });
   const blockedResponse = await blockedHandler(new Request(path, { headers: { host, "x-macdry-token": token } }));
   equal((await blockedResponse.json()).eligible, false);
+});
+
+Deno.test("system test endpoints require authenticated same-origin POST actions", async () => {
+  const calls = [];
+  const h = createHandler({
+    port: 12345,
+    token,
+    readAsset: () => "",
+    scan: () => ({}),
+    verifyVolume: async () => { calls.push("filesystem"); return { status: "unavailable", summary: "not tested" }; },
+    networkQuality: async () => { calls.push("network"); return { status: "measurement-recorded", metrics: { download_mbps: 12 } }; },
+    logScan: async () => { calls.push("logs"); return { status: "no-anomaly-detected", matches: {} }; },
+  });
+  const path = `http://${host}/api/tests/network-quality`;
+  equal((await h(new Request(path, { method: "POST", headers: { host } }))).status, 401);
+  equal((await h(new Request(path, { headers: { host, "x-macdry-token": token } }))).status, 405);
+  equal((await h(new Request(path, { method: "POST", headers: { host, "x-macdry-token": token, origin: "http://attacker.example" } }))).status, 403);
+  equal((await h(new Request(`http://${host}/api/tests/unknown`, { method: "POST", headers: { host, "x-macdry-token": token } }))).status, 404);
+  const network = await h(new Request(path, { method: "POST", headers: { host, "x-macdry-token": token } }));
+  equal(network.status, 200);
+  equal((await network.json()).metrics.download_mbps, 12);
+  equal((await h(new Request(`http://${host}/api/tests/filesystem`, { method: "POST", headers: { host, "x-macdry-token": token } }))).status, 200);
+  equal((await h(new Request(`http://${host}/api/tests/log-scan`, { method: "POST", headers: { host, "x-macdry-token": token } }))).status, 200);
+  equal(JSON.stringify(calls), JSON.stringify(["network", "filesystem", "logs"]));
 });
 
 Deno.test("load-test signal collection uses only fixed bounded read-only commands", async () => {

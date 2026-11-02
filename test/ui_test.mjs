@@ -132,7 +132,7 @@ class Page {
 // graphics, download and network boundaries are replaced with deterministic fakes.
 function installMocks({ storageBlocked, storageWriteBlocked }) {
   const state = window.__test = {
-    runId: Math.random().toString(36), requests: [], responses: [], preflightResponses: [], pendingRequests: [],
+    runId: Math.random().toString(36), requests: [], responses: [], preflightResponses: [], systemResponses: { filesystem: [], network_quality: [], logs: [] }, pendingRequests: [],
     mediaCalls: [], mediaModes: [], pendingMedia: [], streams: [], audioContexts: [], workers: [], workerMessages: [], workerModes: [],
     graphicsAvailable: true, graphicsCalls: [], downloads: [], blobs: [], revoked: [], fastGpu: false, fakeNow: 0,
     localStorageReads: 0, recorderCalls: 0,
@@ -153,13 +153,24 @@ function installMocks({ storageBlocked, storageWriteBlocked }) {
   window.fetch = async (url, options) => {
     state.requests.push({ url: String(url), options });
     const isPreflight = url === "/api/load-test/preflight";
-    if (url !== "/api/checks" && !isPreflight) throw new Error("Unexpected network request");
-    const responseQueue = isPreflight ? state.preflightResponses : state.responses;
+    const systemTestId = {
+      "/api/tests/filesystem": "filesystem",
+      "/api/tests/network-quality": "network_quality",
+      "/api/tests/log-scan": "logs",
+    }[url];
+    if (url !== "/api/checks" && !isPreflight && !systemTestId) throw new Error("Unexpected network request");
+    const responseQueue = isPreflight ? state.preflightResponses : systemTestId ? state.systemResponses[systemTestId] : state.responses;
     let response = responseQueue.shift() || (isPreflight
       ? { status: 200, data: { eligible: true, checks: [
         { id: "memory_pressure", status: "info", summary: "macOS reports normal memory pressure." },
         { id: "thermal", status: "info", summary: "macOS reports a normal thermal warning level." }
       ] } }
+      : systemTestId === "network_quality"
+      ? { status: 200, data: { status: "measurement-recorded", summary: "Quality measured.", metrics: { download_mbps: 20, upload_mbps: 5 }, details: "Traffic was sent." } }
+      : systemTestId === "filesystem"
+      ? { status: 200, data: { status: "no-anomaly-detected", summary: "Volume verification reported no issue.", details: "No raw output." } }
+      : systemTestId === "logs"
+      ? { status: 200, data: { status: "no-anomaly-detected", summary: "No matching log events.", matches: {}, details: "Aggregate only." } }
       : { status: 200, data: { checks: [] } });
     if (response.deferred) response = await new Promise((resolve) => state.pendingRequests.push(resolve));
     if (response.reject) throw new Error(response.reject);
@@ -350,7 +361,7 @@ test("API failures and stale responses cannot show misleading results", async ()
 
 test("summary separates check and human response states and displays recommendations safely", async () => usingPage({}, async (page) => {
   assert.match(await page.eval("document.querySelector('#summary-checks').textContent"), /not run yet/i);
-  assert.match(await page.eval("document.querySelector('#summary-tests').textContent"), /Not tested: 6 · Unavailable: 0/);
+  assert.match(await page.eval("document.querySelector('#summary-tests').textContent"), /Not tested: 9 · Unavailable: 0/);
   const checks = [
     { id: "storage", status: "warning", title: "Storage", summary: "Almost full", details: "90% used", source: "df", recommendation: "Review space <img src=x onerror=alert(1)>" },
     { id: "smart", status: "fail", title: "SMART", recommendation: "Back up data" },
@@ -369,14 +380,14 @@ test("summary separates check and human response states and displays recommendat
   assert.equal(cards[0].images, 0);
   assert.match(cards[2].recommendation, /does not establish hardware health/);
   await page.eval("document.querySelector('[data-action=start-keyboard]').click(); document.querySelector('[data-test=keyboard] [data-feedback=pass]').click(); document.querySelector('[data-action=start-pointer]').click(); document.querySelector('[data-test=pointer] [data-feedback=fail]').click(); __test.graphicsAvailable = false; document.querySelector('[data-action=start-gpu]').click()");
-  assert.match(await page.eval("document.querySelector('#summary-tests').textContent"), /Human pass: 1 · Human fail: 1 · Not tested: 3 · Unavailable: 1/);
+  assert.match(await page.eval("document.querySelector('#summary-tests').textContent"), /Human pass: 1 · Human fail: 1 · Not tested: 6 · Unavailable: 1/);
   assert.match(await page.eval("document.querySelector('[data-test=gpu] .test-guidance').textContent"), /graphics settings/);
   assert.match(await page.eval("document.querySelector('[data-test=keyboard] .test-guidance').textContent"), /human response.*not proof/i);
   assert.match(await page.eval("document.querySelector('.summary-limit').textContent"), /human responses, not proof/i);
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
   assert.deepEqual(report.summary.checks, { fail: 1, warning: 1, info: 1, unavailable: 1, unknown: 1 });
-  assert.deepEqual(report.summary.tests, { "not-tested": 3, pass: 1, fail: 1, unavailable: 1 });
+  assert.deepEqual(report.summary.tests, { "not-tested": 6, pass: 1, fail: 1, unavailable: 1 });
   assert.deepEqual(report.checks.map(({ id, status }) => ({ id, status })), [
     { id: "storage", status: "warning" }, { id: "smart", status: "fail" }, { id: "memory", status: "info" },
     { id: "battery", status: "unavailable" }, { id: "other-5", status: "unknown" },
@@ -576,6 +587,47 @@ test("audio and graphics need user confirmation and handle unavailable WebGL", a
   assert.equal(await page.eval("document.querySelector('#gpu-workspace').hidden"), false);
 }));
 
+test("manual port, wireless and physical checks record only explicit human responses", async () => usingPage({}, async (page) => {
+  const initial = await page.eval("({ requests: __test.requests.length, enabled: [!document.querySelector('[data-test=ports] [data-feedback=pass]').disabled, !document.querySelector('[data-test=wireless] [data-feedback=pass]').disabled, !document.querySelector('[data-test=physical_condition] [data-feedback=pass]').disabled] })");
+  assert.deepEqual(initial, { requests: 0, enabled: [true, true, true] });
+  await page.eval(`document.querySelector('[data-test="ports"] [data-feedback=unavailable]').click(); document.querySelector('[data-test="physical_condition"] [data-feedback=fail]').click()`);
+  assert.equal(await page.eval(`document.querySelector('[data-test="ports"] [data-result]').dataset.status`), "unavailable");
+  assert.equal(await page.eval(`document.querySelector('[data-test="physical_condition"] [data-result]').dataset.status`), "fail");
+  assert.match(await page.eval(`document.querySelector('[data-test="physical_condition"] .test-guidance').textContent`), /stop using or charging/i);
+  assert.equal(await page.eval("__test.requests.length"), 0);
+}));
+
+test("system tests require explicit actions, confirmation and export only sanitized results", async () => usingPage({}, async (page) => {
+  assert.equal(await page.eval("__test.requests.length"), 0);
+  assert.equal(await page.eval("document.querySelector('#verify-volume').disabled"), true);
+  assert.equal(await page.eval("document.querySelector('#network-quality-start').disabled"), true);
+  await page.eval("document.querySelector('#verify-volume').click(); document.querySelector('#network-quality-start').click()");
+  assert.equal(await page.eval("__test.requests.length"), 0);
+
+  await page.eval(`__test.systemResponses.filesystem.push({ status: 200, data: { status: "no-anomaly-detected", summary: "Volume verification reported no issue.", details: "No raw command output." } }); document.querySelector('#filesystem-confirmed').checked = true; document.querySelector('#filesystem-confirmed').dispatchEvent(new Event('change')); document.querySelector('#verify-volume').click()`);
+  await page.wait("document.querySelector('#filesystem-result').dataset.status === 'no-anomaly-detected'");
+  const filesystemRequest = await page.eval("__test.requests[0]");
+  assert.equal(filesystemRequest.url, "/api/tests/filesystem");
+  assert.equal(filesystemRequest.options.method, "POST");
+  assert.equal(filesystemRequest.options.headers["X-Macdry-Token"], token);
+
+  await page.eval(`__test.systemResponses.network_quality.push({ status: 200, data: { status: "measurement-recorded", summary: "Measured.", details: "No hardware verdict.", metrics: { download_mbps: 20, upload_mbps: 5, secret: "PRIVATE_INTERFACE" }, interface_name: "PRIVATE_INTERFACE" } }); document.querySelector('#network-quality-confirmed').checked = true; document.querySelector('#network-quality-confirmed').dispatchEvent(new Event('change')); document.querySelector('#network-quality-start').click()`);
+  await page.wait("document.querySelector('#network_quality-result').dataset.status === 'measurement-recorded'");
+  assert.match(await page.eval("document.querySelector('#network_quality-state').textContent"), /Download: 20 Mbps/);
+
+  await page.eval(`__test.systemResponses.logs.push({ status: 200, data: { status: "warning", summary: "2 filtered entries found.", details: "Aggregate only.", matches: { panic: 1, storage: 1, battery: 0, thermal: 0, sensor: 0 }, raw: "PRIVATE_RAW_LOG" } }); document.querySelector('#scan-logs').click()`);
+  await page.wait("document.querySelector('#logs-result').dataset.status === 'warning'");
+  await page.eval("document.querySelector('#export-report').click()");
+  const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
+  assert.equal(report.system_tests.filesystem.status, "no-anomaly-detected");
+  assert.equal(report.system_tests.network_quality.metrics.download_mbps, 20);
+  assert.equal(report.system_tests.network_quality.metrics.secret, undefined);
+  assert.equal(report.system_tests.logs.matches.panic, 1);
+  assert.equal(JSON.stringify(report).includes("PRIVATE_INTERFACE"), false);
+  assert.equal(JSON.stringify(report).includes("PRIVATE_RAW_LOG"), false);
+  assert.deepEqual(report.summary.system_tests, { run: 3, unavailable: 0 });
+}));
+
 test("controlled load test requires normal preflight and explicit confirmation before its bounded workload", async () => usingPage({}, async (page) => {
   assert.equal(await page.eval("__test.workers.length"), 0);
   await page.eval(`__test.preflightResponses.push({ status: 200, data: { eligible: false, checks: [
@@ -606,7 +658,7 @@ test("controlled load test requires normal preflight and explicit confirmation b
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
   assert.equal(report.hardware_load_test.status, "no-anomaly-detected");
-  assert.ok(report.hardware_load_test.duration_seconds <= 20);
+  assert.ok(report.hardware_load_test.duration_seconds <= 900);
   assert.deepEqual(report.hardware_load_test.components, {
     cpu: "no-anomaly-detected", memory: "no-anomaly-detected", gpu: "no-anomaly-detected"
   });
@@ -660,7 +712,7 @@ test("load test stops when a live safety snapshot becomes abnormal or unavailabl
 test("export before checks preserves their not-run state without making requests", async () => usingPage({}, async (page) => {
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
-  assert.equal(report.version, 2);
+  assert.equal(report.version, 3);
   assert.equal(report.checks_state, "not-run");
   assert.equal(report.checks, null);
   assert.equal(report.summary.checks, null);
@@ -669,8 +721,10 @@ test("export before checks preserves their not-run state without making requests
     status: "not-run", started_at: null, duration_seconds: null,
     preflight: { memory_pressure: "not-run", thermal: "not-run" },
     components: { cpu: "not-run", memory: "not-run", gpu: "not-run" },
-    limitations: "Preflight statuses are retained; an unavailable thermal-warning signal is not a normal reading and means MacDry cannot monitor heat. The 16 MiB memory pattern, bounded CPU calculation and WebGL workload cover only a small portion of the hardware. WebGL may use software rendering. No-anomaly-detected is not proof of hardware health."
+    limitations: "Preflight statuses are retained; an unavailable thermal-warning signal is not a normal reading and means MacDry cannot monitor heat. CPU work runs for at most 14 minutes on two workers; the 256 MiB memory sample covers only a small portion of RAM and macOS may still swap. WebGL may use software rendering. No-anomaly-detected is not proof of hardware health."
   });
+  assert.deepEqual(report.summary.system_tests, { run: 0, unavailable: 0 });
+  assert.deepEqual(Object.keys(report.system_tests), ["filesystem", "network_quality", "logs"]);
   assert.equal(await page.eval("__test.requests.length + __test.mediaCalls.length + __test.workers.length"), 0);
 }));
 
@@ -724,9 +778,9 @@ test("download preserves filtered engine observations and recommendations while 
   assert.equal(await page.eval("__test.downloads.length"), 0);
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
-  assert.deepEqual(Object.keys(report), ["version", "date", "limitations", "summary", "checks_state", "checks", "tests", "hardware_load_test"]);
+  assert.deepEqual(Object.keys(report), ["version", "date", "limitations", "summary", "checks_state", "checks", "tests", "system_tests", "hardware_load_test"]);
   assert.equal(report.checks_state, "complete");
-  assert.equal(report.version, 2);
+  assert.equal(report.version, 3);
   assert.ok(!Number.isNaN(Date.parse(report.date)));
   assert.deepEqual(report.checks.slice(0, 3), [power, thermal, pressure]);
   assert.deepEqual(report.checks[3], { id: "other-4", status: "unknown", recommendation: "Review the source and retry the local check; an unavailable or unknown result is not a diagnosis." });
@@ -736,6 +790,8 @@ test("download preserves filtered engine observations and recommendations while 
     { id: "keyboard", status: "pass" }, { id: "pointer", status: "not-tested" },
     { id: "camera", status: "unavailable" }, { id: "microphone", status: "not-tested" },
     { id: "audio", status: "not-tested" }, { id: "gpu", status: "not-tested" },
+    { id: "ports", status: "not-tested" }, { id: "wireless", status: "not-tested" },
+    { id: "physical_condition", status: "not-tested" },
   ]);
   assert.ok(!JSON.stringify(report).includes(token));
   assert.ok(!JSON.stringify(report).includes("PRIVATE_KEY"));
