@@ -8,6 +8,22 @@
   const labels = { "not-tested": "Not tested", pass: "Pass", fail: "Fail", unavailable: "Unavailable" };
   const checkStatuses = ["fail", "warning", "info", "unavailable", "unknown"];
   const checkIds = new Set(["macos", "model", "cpu", "memory", "gpu", "storage", "smart", "battery", "memory_pressure", "battery_power", "thermal"]);
+  const loadTest = {
+    status: "not-run",
+    startedAt: null,
+    durationSeconds: null,
+    preflight: { memory_pressure: "not-run", thermal: "not-run" },
+    components: { cpu: "not-run", memory: "not-run", gpu: "not-run" }
+  };
+  const loadStatusLabels = {
+    "not-run": "Not run",
+    running: "Running",
+    "no-anomaly-detected": "No anomaly detected",
+    "anomaly-detected": "Anomaly detected",
+    incomplete: "Incomplete",
+    interrupted: "Stopped",
+    blocked: "Blocked"
+  };
   let checks = null;
   let checksState = "not-run";
   let checksRequest = 0;
@@ -118,6 +134,25 @@
       : messages[checksState];
     const guided = testCounts();
     $("#summary-tests").textContent = `Human pass: ${guided.pass} · Human fail: ${guided.fail} · Not tested: ${guided["not-tested"]} · Unavailable: ${guided.unavailable}`;
+    $("#summary-load-test").textContent = loadSummaryText();
+  }
+  function loadSummaryText() {
+    const messages = {
+      "not-run": "Not run.",
+      running: "In progress.",
+      "no-anomaly-detected": "Nothing unusual detected during this test.",
+      "anomaly-detected": "An anomaly was detected during this test.",
+      incomplete: "Incomplete; one or more components were unavailable.",
+      interrupted: "Stopped before completion.",
+      blocked: "Blocked by the readiness check."
+    };
+    return messages[loadTest.status] || "Unknown result.";
+  }
+  function renderLoadTest() {
+    const badge = $("#load-test-result");
+    badge.dataset.status = loadTest.status;
+    badge.textContent = loadStatusLabels[loadTest.status] || "Unknown";
+    renderSummary();
   }
   function checkRecommendation(check) {
     const status = checkStatus(check);
@@ -515,6 +550,372 @@
   });
   action("stop-gpu").addEventListener("click", () => stopGpu("Graphics test stopped."));
 
+  const LOAD_CPU_DURATION_MS = 8_000;
+  const LOAD_GPU_DURATION_MS = 6_000;
+  const LOAD_TEST_TIMEOUT_MS = 20_000;
+  const LOAD_CPU_WORKERS = 2;
+  let loadPreflightReady = false;
+  let loadThermalUnavailableAtStart = false;
+  let loadGeneration = 0;
+  let loadWorkers = [];
+  let loadWorkerCancellations = new Set();
+  let loadFrame = 0;
+  let loadTimer = 0;
+  let loadSafetyTimer = 0;
+  let loadSafetyController = null;
+  let loadGl = null;
+  let loadStartedAt = 0;
+  let loadGpuCleanup = () => {};
+
+  function updateLoadStatus(status, message) {
+    loadTest.status = status;
+    if (message) $("#load-test-message").textContent = message;
+    renderLoadTest();
+  }
+  function blockLoadTest(message) {
+    loadTest.startedAt = null;
+    loadTest.durationSeconds = null;
+    loadTest.components = { cpu: "not-run", memory: "not-run", gpu: "not-run" };
+    updateLoadStatus("blocked", message);
+  }
+  function updateLoadComponent(name, status) {
+    loadTest.components[name] = status;
+  }
+  function renderPreflight(checksToShow) {
+    const results = $("#load-preflight-results");
+    results.replaceChildren();
+    const names = { memory_pressure: "Memory pressure", thermal: "Thermal warning" };
+    const statuses = { info: "Normal snapshot", warning: "Warning", unavailable: "Unavailable", unknown: "Unknown" };
+    checksToShow.forEach((check) => {
+      if (!check || !names[check.id]) return;
+      const row = document.createElement("div");
+      row.className = "load-preflight-row";
+      const label = document.createElement("span");
+      label.textContent = names[check.id];
+      const value = document.createElement("strong");
+      value.textContent = statuses[check.status] || "Unknown";
+      row.append(label, value);
+      results.append(row);
+    });
+    results.hidden = results.childElementCount === 0;
+  }
+  async function checkLoadReadiness() {
+    const button = $("#load-preflight");
+    const confirmation = $("#load-confirmation");
+    const checkbox = $("#load-confirmed");
+    const start = $("#load-start");
+    button.disabled = true;
+    loadPreflightReady = false;
+    checkbox.checked = false;
+    confirmation.hidden = true;
+    start.disabled = true;
+    renderPreflight([]);
+    $("#load-preflight-state").textContent = "Checking current macOS memory-pressure and thermal-warning signals…";
+    if (!token) {
+      $("#load-preflight-state").textContent = "A session token is required for the local readiness check.";
+      loadTest.preflight = { memory_pressure: "unavailable", thermal: "unavailable" };
+      blockLoadTest("The readiness check could not run without the local session token.");
+      button.disabled = false;
+      return;
+    }
+    try {
+      const response = await fetch("/api/load-test/preflight", {
+        method: "GET", headers: { "X-Macdry-Token": token }, cache: "no-store", credentials: "same-origin", referrerPolicy: "no-referrer"
+      });
+      if (!response.ok) throw new Error("The local readiness check failed.");
+      const data = await response.json();
+      const pressure = data?.checks?.find((check) => check?.id === "memory_pressure");
+      const thermal = data?.checks?.find((check) => check?.id === "thermal");
+      const valid = data && Array.isArray(data.checks) && data.checks.length === 2 && pressure && thermal &&
+        ["info", "warning", "unavailable", "unknown"].includes(pressure.status) &&
+        ["info", "warning", "unavailable", "unknown"].includes(thermal.status);
+      if (!valid) throw new Error("The local readiness check returned invalid data.");
+      renderPreflight(data.checks);
+      loadTest.preflight = { memory_pressure: pressure.status, thermal: thermal.status };
+      loadThermalUnavailableAtStart = thermal.status === "unavailable";
+      loadPreflightReady = data.eligible === true && pressure.status === "info" &&
+        ["info", "unavailable"].includes(thermal.status);
+      if (loadPreflightReady) {
+        confirmation.hidden = false;
+        $("#load-preflight-state").textContent = thermal.status === "unavailable"
+          ? "Memory pressure is normal, but the thermal-warning signal is unavailable. MacDry cannot monitor heat; continue only if the Mac is cool and you will stop if it heats or macOS warns."
+          : "Memory pressure and the thermal-warning snapshot are normal. Neither reports temperature or guarantees safe conditions.";
+        $("#load-test-message").textContent = "Review the checklist and explicitly confirm before starting the workload.";
+        if (loadTest.status === "blocked") {
+          loadTest.startedAt = null;
+          loadTest.durationSeconds = null;
+          loadTest.components = { cpu: "not-run", memory: "not-run", gpu: "not-run" };
+          updateLoadStatus("not-run");
+        }
+      } else {
+        $("#load-preflight-state").textContent = "A memory-pressure or thermal-warning snapshot is warning, unknown or unavailable. The workload is blocked unless memory pressure is normal and no thermal warning is reported.";
+        blockLoadTest("The readiness check reported unsafe or insufficient memory-pressure/thermal-warning signals; no workload ran.");
+      }
+    } catch {
+      $("#load-preflight-state").textContent = "Could not verify readiness from the local server. No workload ran; check the session link and retry.";
+      loadTest.preflight = { memory_pressure: "unavailable", thermal: "unavailable" };
+      blockLoadTest("The local readiness check was unavailable; no workload ran.");
+    } finally {
+      button.disabled = false;
+    }
+  }
+  $("#load-preflight").addEventListener("click", checkLoadReadiness);
+  $("#load-confirmed").addEventListener("change", (event) => {
+    $("#load-start").disabled = !loadPreflightReady || !event.currentTarget.checked || loadTest.status === "running";
+  });
+
+  function workerPhase(worker, type, generation) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (status) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.removeEventListener("message", onMessage);
+        worker.removeEventListener("error", onError);
+        loadWorkerCancellations.delete(cancel);
+        resolve(status);
+      };
+      const onMessage = (event) => {
+        if (generation !== loadGeneration || event.data?.type !== type) return;
+        const allowed = ["no-anomaly-detected", "anomaly-detected", "unavailable", "interrupted"];
+        finish(allowed.includes(event.data.status) ? event.data.status : "unavailable");
+      };
+      const onError = () => finish("unavailable");
+      const cancel = () => finish("interrupted");
+      const timer = setTimeout(() => finish("unavailable"), type === "cpu" ? LOAD_CPU_DURATION_MS + 1_000 : 5_000);
+      loadWorkerCancellations.add(cancel);
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", onError, { once: true });
+      try {
+        worker.postMessage({ type });
+      } catch {
+        finish("unavailable");
+      }
+    });
+  }
+  function combineWorkerStatuses(statuses) {
+    if (statuses.includes("anomaly-detected")) return "anomaly-detected";
+    if (statuses.includes("interrupted")) return "interrupted";
+    return statuses.length > 0 && statuses.every((status) => status === "no-anomaly-detected") ? "no-anomaly-detected" : "unavailable";
+  }
+  function cleanupLoadResources() {
+    clearTimeout(loadTimer);
+    clearTimeout(loadSafetyTimer);
+    loadTimer = 0;
+    loadSafetyTimer = 0;
+    loadSafetyController?.abort();
+    loadSafetyController = null;
+    if (loadFrame) cancelAnimationFrame(loadFrame);
+    loadFrame = 0;
+    loadGpuCleanup();
+    loadGpuCleanup = () => {};
+    loadGl = null;
+    for (const cancel of [...loadWorkerCancellations]) cancel();
+    loadWorkers.forEach((worker) => worker.terminate());
+    loadWorkers = [];
+    $("#load-test-workspace").hidden = true;
+    $("#load-preflight").disabled = false;
+    $("#load-confirmation").hidden = true;
+    $("#load-confirmed").checked = false;
+    $("#load-start").disabled = true;
+    $("#load-stop").disabled = true;
+  }
+  function finishLoadTest(generation, status, message) {
+    if (generation !== loadGeneration) return;
+    cleanupLoadResources();
+    loadGeneration++;
+    for (const name of Object.keys(loadTest.components)) {
+      if (loadTest.components[name] === "running") {
+        loadTest.components[name] = status === "interrupted" ? "interrupted" : "unavailable";
+      }
+    }
+    loadTest.status = status;
+    loadTest.durationSeconds = loadStartedAt ? Math.min(20, Math.ceil((Date.now() - loadStartedAt) / 1000)) : null;
+    $("#load-test-message").textContent = message;
+    renderLoadTest();
+  }
+  function stopLoadTest(message = "Stopped. No further workload will run.") {
+    if (loadTest.status !== "running") return;
+    finishLoadTest(loadGeneration, "interrupted", message);
+  }
+  $("#load-stop").addEventListener("click", () => stopLoadTest());
+
+  function scheduleLoadSafetyCheck(generation) {
+    if (generation !== loadGeneration || loadTest.status !== "running") return;
+    loadSafetyTimer = setTimeout(() => runLoadSafetyCheck(generation), 2_500);
+  }
+  async function runLoadSafetyCheck(generation) {
+    if (generation !== loadGeneration || loadTest.status !== "running") return;
+    const controller = new AbortController();
+    loadSafetyController = controller;
+    const timeout = setTimeout(() => controller.abort(), 4_500);
+    try {
+      const response = await fetch("/api/load-test/preflight", {
+        method: "GET", headers: { "X-Macdry-Token": token }, cache: "no-store", credentials: "same-origin", referrerPolicy: "no-referrer", signal: controller.signal
+      });
+      if (!response.ok) throw new Error("Safety snapshot unavailable");
+      const data = await response.json();
+      const pressure = data?.checks?.find((check) => check?.id === "memory_pressure");
+      const thermal = data?.checks?.find((check) => check?.id === "thermal");
+      const thermalSafe = thermal?.status === "info" ||
+        (loadThermalUnavailableAtStart && thermal?.status === "unavailable");
+      const safe = data?.eligible === true && Array.isArray(data.checks) && data.checks.length === 2 &&
+        pressure?.status === "info" && thermalSafe;
+      if (!safe) {
+        stopLoadTest("Stopped because memory pressure became abnormal or a thermal warning appeared or changed while running.");
+        return;
+      }
+      scheduleLoadSafetyCheck(generation);
+    } catch {
+      if (generation === loadGeneration && loadTest.status === "running") {
+        stopLoadTest("Stopped because the current memory-pressure or thermal-warning snapshot could not be verified.");
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (loadSafetyController === controller) loadSafetyController = null;
+    }
+  }
+
+  function compileLoadShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    if (!shader) throw new Error("Shader unavailable");
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error("Shader compilation failed");
+    return shader;
+  }
+  function runGpuLoad(generation) {
+    return new Promise((resolve) => {
+      const canvas = $("#load-canvas");
+      let finished = false;
+      let context;
+      let program;
+      let buffer;
+      const finish = (status) => {
+        if (finished) return;
+        finished = true;
+        canvas.removeEventListener("webglcontextlost", onContextLost);
+        if (buffer && context && !context.isContextLost()) context.deleteBuffer(buffer);
+        loadGpuCleanup = () => {};
+        resolve(status);
+      };
+      const onContextLost = (event) => {
+        event.preventDefault();
+        finish("unavailable");
+      };
+      try {
+        context = canvas.getContext("webgl", { antialias: false, powerPreference: "low-power" });
+        if (!context || context.isContextLost()) throw new Error("WebGL unavailable");
+        const vertex = compileLoadShader(context, context.VERTEX_SHADER,
+          "attribute vec2 a_position; varying vec2 v_uv; void main(){ v_uv=(a_position+1.0)*0.5; gl_Position=vec4(a_position,0.0,1.0); }");
+        const fragment = compileLoadShader(context, context.FRAGMENT_SHADER,
+          "precision mediump float; uniform float u_time; varying vec2 v_uv; void main(){ vec2 p=(v_uv-0.5)*2.0; float value=0.25; for(int i=0;i<24;i++){ p=vec2(p.x*p.x-p.y*p.y,2.0*p.x*p.y)+vec2(sin(u_time*0.1)*0.01,cos(u_time*0.1)*0.01); value=fract(value+dot(p,p)*0.017); } gl_FragColor=vec4(value,fract(value*1.7),fract(value*2.3),1.0); }");
+        program = context.createProgram();
+        if (!program) throw new Error("Program unavailable");
+        context.attachShader(program, vertex);
+        context.attachShader(program, fragment);
+        context.linkProgram(program);
+        if (!context.getProgramParameter(program, context.LINK_STATUS)) throw new Error("Program link failed");
+        context.useProgram(program);
+        const location = context.getAttribLocation(program, "a_position");
+        if (location < 0) throw new Error("Attribute unavailable");
+        buffer = context.createBuffer();
+        if (!buffer) throw new Error("Buffer unavailable");
+        context.bindBuffer(context.ARRAY_BUFFER, buffer);
+        context.bufferData(context.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), context.STATIC_DRAW);
+        context.enableVertexAttribArray(location);
+        context.vertexAttribPointer(location, 2, context.FLOAT, false, 0, 0);
+        context.viewport(0, 0, canvas.width, canvas.height);
+        const timeLocation = context.getUniformLocation(program, "u_time");
+        const started = performance.now();
+        loadGl = context;
+        loadGpuCleanup = () => finish("interrupted");
+        canvas.addEventListener("webglcontextlost", onContextLost);
+        $("#load-test-workspace").hidden = false;
+        const draw = (now) => {
+          if (generation !== loadGeneration || context.isContextLost()) {
+            finish("unavailable");
+            return;
+          }
+          context.uniform1f(timeLocation, (now - started) / 1000);
+          context.drawArrays(context.TRIANGLES, 0, 6);
+          if (context.getError() !== context.NO_ERROR) {
+            finish("anomaly-detected");
+            return;
+          }
+          if (now - started >= LOAD_GPU_DURATION_MS) {
+            finish("no-anomaly-detected");
+            return;
+          }
+          loadFrame = requestAnimationFrame(draw);
+        };
+        loadFrame = requestAnimationFrame(draw);
+      } catch {
+        if (context && buffer && !context.isContextLost()) context.deleteBuffer(buffer);
+        finish("unavailable");
+      }
+    });
+  }
+  async function startLoadTest() {
+    if (!loadPreflightReady || !$("#load-confirmed").checked || loadTest.status === "running") return;
+    if (typeof Worker !== "function") {
+      updateLoadStatus("incomplete", "This browser cannot run the bounded CPU and memory workers.");
+      return;
+    }
+    const generation = ++loadGeneration;
+    loadStartedAt = Date.now();
+    loadTest.startedAt = new Date(loadStartedAt).toISOString();
+    loadTest.durationSeconds = null;
+    loadTest.components = { cpu: "running", memory: "not-run", gpu: "not-run" };
+    loadPreflightReady = false;
+    $("#load-preflight").disabled = true;
+    $("#load-confirmation").hidden = true;
+    $("#load-start").disabled = true;
+    $("#load-stop").disabled = false;
+    $("#load-test-workspace").hidden = false;
+    $("#load-test-message").textContent = "CPU workload running on at most two workers. Stop at any time.";
+    updateLoadStatus("running", "The bounded workload is running.");
+    loadTimer = setTimeout(() => finishLoadTest(generation, "incomplete", "The fixed maximum duration was reached; the test stopped."), LOAD_TEST_TIMEOUT_MS);
+    void runLoadSafetyCheck(generation);
+    try {
+      for (let index = 0; index < LOAD_CPU_WORKERS; index++) loadWorkers.push(new Worker("/load-worker.js"));
+    } catch {
+      finishLoadTest(generation, "incomplete", "The local workload worker could not start.");
+      return;
+    }
+    const cpu = combineWorkerStatuses(await Promise.all(loadWorkers.map((worker) => workerPhase(worker, "cpu", generation))));
+    if (generation !== loadGeneration) return;
+    updateLoadComponent("cpu", cpu);
+    if (cpu !== "no-anomaly-detected") {
+      finishLoadTest(generation, cpu === "anomaly-detected" ? "anomaly-detected" : cpu === "interrupted" ? "interrupted" : "incomplete",
+        cpu === "anomaly-detected" ? "The CPU workload produced an inconsistent result. This is not a hardware diagnosis." : "The CPU workload did not complete; remaining phases were not run.");
+      return;
+    }
+    updateLoadComponent("memory", "running");
+    $("#load-test-message").textContent = "Checking a bounded 16 MiB memory buffer. Stop at any time.";
+    const memory = await workerPhase(loadWorkers[0], "memory", generation);
+    if (generation !== loadGeneration) return;
+    updateLoadComponent("memory", memory);
+    if (memory !== "no-anomaly-detected") {
+      finishLoadTest(generation, memory === "anomaly-detected" ? "anomaly-detected" : memory === "interrupted" ? "interrupted" : "incomplete",
+        memory === "anomaly-detected" ? "The memory workload found a pattern mismatch. This is not a hardware diagnosis." : "The memory workload did not complete; the graphics phase was not run.");
+      return;
+    }
+    updateLoadComponent("gpu", "running");
+    $("#load-test-message").textContent = "Running a short WebGL workload through the browser graphics stack.";
+    const gpu = await runGpuLoad(generation);
+    if (generation !== loadGeneration) return;
+    updateLoadComponent("gpu", gpu);
+    if (gpu !== "no-anomaly-detected") {
+      finishLoadTest(generation, gpu === "anomaly-detected" ? "anomaly-detected" : "incomplete",
+        gpu === "anomaly-detected" ? "The WebGL workload reported a graphics error. This is not a hardware diagnosis." : "The WebGL workload was unavailable or did not complete.");
+      return;
+    }
+    finishLoadTest(generation, "no-anomaly-detected", "Nothing unusual was detected during this test. It does not certify that the Mac is healthy.");
+  }
+  $("#load-start").addEventListener("click", startLoadTest);
+
   function stopActiveTests() {
     stopKeyboard();
     stopPointer();
@@ -522,19 +923,28 @@
     if (media.microphone.stream || media.microphone.pending) stopMedia("microphone", "Stopped because the page was hidden or closed.");
     if (audioContext) stopAudio("Tones stopped because the page was hidden or closed.");
     if (gl) stopGpu("Graphics test stopped because the page was hidden or closed.");
+    if (loadTest.status === "running") stopLoadTest("Stopped because the page was hidden or closed.");
   }
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopActiveTests(); });
   window.addEventListener("pagehide", stopActiveTests);
 
   $("#export-report").addEventListener("click", () => {
     const report = {
-      version: 1,
+      version: 2,
       date: new Date().toISOString(),
-      limitations: "Guided pass and fail are human responses to limited tests, not proof of hardware health. Local checks are not a complete diagnosis.",
+      limitations: "Guided pass and fail are human responses to limited tests, not proof of hardware health. The controlled load test reports only what happened during its bounded CPU, memory and browser graphics workloads; no-anomaly-detected is not a hardware guarantee. Local checks are not a complete diagnosis.",
       summary: { checks: checkCounts(), tests: testCounts() },
       checks_state: checksState,
       checks: checks === null ? null : checks.map(reportCheck),
-      tests: testIds.map((id) => ({ id, status: results[id], recommendation: testRecommendation(id, results[id]) }))
+      tests: testIds.map((id) => ({ id, status: results[id], recommendation: testRecommendation(id, results[id]) })),
+      hardware_load_test: {
+        status: loadTest.status,
+        started_at: loadTest.startedAt,
+        duration_seconds: loadTest.durationSeconds,
+        components: { ...loadTest.components },
+        preflight: { ...loadTest.preflight },
+        limitations: "Preflight statuses are retained; an unavailable thermal-warning signal is not a normal reading and means MacDry cannot monitor heat. The 16 MiB memory pattern, bounded CPU calculation and WebGL workload cover only a small portion of the hardware. WebGL may use software rendering. No-anomaly-detected is not proof of hardware health."
+      }
     };
     const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
     const link = document.createElement("a");

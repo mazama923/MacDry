@@ -481,3 +481,12 @@ pub fn checks(facts: Facts) -> List(Check) {
     thermal(facts),
   ]
 }
+
+pub fn load_test_eligible(facts: Facts) -> Bool {
+  let pressure = memory_pressure(facts)
+  let thermal_check = thermal(facts)
+  case pressure.status, thermal_check.status {
+    "info", "info" | "info", "unavailable" -> True
+    _, _ -> False
+  }
+}

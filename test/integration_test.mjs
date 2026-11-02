@@ -15,7 +15,7 @@ try {
   }
   await Deno.copyFile("build/dev/javascript/prelude.mjs", `${sandbox}/build/dev/javascript/prelude.mjs`);
   const expectedAssets = {};
-  for (const name of ["index.html", "style.css", "app.js"]) {
+  for (const name of ["index.html", "style.css", "app.js", "load-worker.js"]) {
     expectedAssets[name] = Deno.args.includes("--real-assets")
       ? await Deno.readTextFile(`public/${name}`)
       : `fixture ${name}`;
@@ -45,12 +45,13 @@ try {
       }
       clearTimeout(timer);
       const [, url, token] = match;
-      for (const name of ["", "index.html", "style.css", "app.js"]) {
+      for (const name of ["", "index.html", "style.css", "app.js", "load-worker.js"]) {
         const response = await fetch(url + name);
         assert(response.status === 200, `Asset ${name} failed`);
         assert((await response.text()) === expectedAssets[name || "index.html"], `Asset ${name} did not match`);
       }
       assert((await fetch(url + "api/checks")).status === 401, "Missing token was accepted");
+      assert((await fetch(url + "api/load-test/preflight")).status === 401, "Load-test preflight accepted a missing token");
       assert((await fetch(url + "api/checks", { headers: { "x-macdry-token": "b".repeat(64) } })).status === 401, "Invalid token was accepted");
       assert((await fetch(url, { headers: { origin: "http://attacker.example" } })).status === 403, "Foreign Origin was accepted");
       const port = Number(new URL(url).port);
@@ -72,6 +73,15 @@ try {
       }
       assert(data.checks.every((check) => ["info", "warning", "unavailable", "fail"].includes(check.status)), "Unknown diagnostic status");
       assert(data.checks.every((check) => typeof check.recommendation === "string" && check.recommendation.length > 0), "Missing recommendation");
+      const preflightResponse = await fetch(url + "api/load-test/preflight", { headers: { "x-macdry-token": token } });
+      assert(preflightResponse.status === 200, "Authenticated load-test preflight failed");
+      const preflight = await preflightResponse.json();
+      assert(typeof preflight.eligible === "boolean", "Load-test preflight omitted eligibility");
+      assert(preflight.checks.length === 2, "Load-test preflight returned unexpected signals");
+      assert(preflight.checks.every((check) => ["memory_pressure", "thermal"].includes(check.id)), "Load-test preflight returned an unexpected check");
+      const pressure = preflight.checks.find((check) => check.id === "memory_pressure");
+      const thermal = preflight.checks.find((check) => check.id === "thermal");
+      assert(preflight.eligible === (pressure.status === "info" && ["info", "unavailable"].includes(thermal.status)), "Load-test preflight eligibility was inconsistent");
       const smart = data.checks.find((check) => check.id === "smart");
       assert(smart.source === "system_profiler SPNVMeDataType", "Unexpected SMART source");
       assert(["info", "warning", "unavailable"].includes(smart.status), "Unexpected SMART status");

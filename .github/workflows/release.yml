@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish macOS ARM64 release
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install build tools
+        run: brew install gleam deno
+
+      - name: Run checks
+        env:
+          CHROME_BIN: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+        run: |
+          gleam format --check src test
+          gleam test --target javascript --runtime deno
+          deno test --no-remote --no-npm test/server_test.mjs
+          node --test test/ui_test.mjs
+          deno run --no-prompt --no-remote --no-npm --allow-read --allow-write=test --allow-net=127.0.0.1 --allow-run test/integration_test.mjs --real-assets
+
+      - name: Build executable
+        run: bash scripts/build.sh
+
+      - name: Package executable and checksum
+        run: |
+          test -x dist/macdry
+          tar -czf dist/macdry-macos-arm64.tar.gz -C dist macdry
+          (cd dist && shasum -a 256 macdry-macos-arm64.tar.gz > macdry-macos-arm64.tar.gz.sha256)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" \
+              dist/macdry-macos-arm64.tar.gz \
+              dist/macdry-macos-arm64.tar.gz.sha256 \
+              --clobber
+          else
+            gh release create "$TAG_NAME" \
+              dist/macdry-macos-arm64.tar.gz \
+              dist/macdry-macos-arm64.tar.gz.sha256 \
+              --verify-tag \
+              --title "MacDry $TAG_NAME" \
+              --generate-notes
+          fi

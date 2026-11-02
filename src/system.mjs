@@ -77,6 +77,28 @@ function label(value) {
 
 const missing = "The system did not report a usable value.";
 
+function normaliseThermal(result) {
+  const facts = {};
+  const lines = result.value?.split(/\r?\n/).filter((line) => /Thermal Warning Level|No thermal warning level/i.test(line)) ?? [];
+  if (lines.length === 1) {
+    const match = /^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} )?Thermal Warning Level = (\d+)$/.exec(lines[0].trim());
+    if (match) {
+      const level = integer(match[1]);
+      if (level >= 0) facts.thermal_warning_level = level;
+    }
+  }
+  if (facts.thermal_warning_level === undefined) facts.thermal_warning_level_issue = result.error || missing;
+  return facts;
+}
+
+export function normaliseLoadSignals(pressure, thermal) {
+  const facts = {};
+  const level = integer(pressure.value);
+  if (level >= 0) facts.memory_pressure_level = level;
+  else facts.memory_pressure_level_issue = pressure.error || missing;
+  return { ...facts, ...normaliseThermal(thermal) };
+}
+
 export function normalise(results) {
   const facts = {};
   const simple = (key, result, parse) => {
@@ -140,16 +162,7 @@ export function normalise(results) {
   }
   facts.battery_power_issue = profileIssue;
 
-  const thermalResult = results.thermal ?? {};
-  const thermalLines = thermalResult.value?.split(/\r?\n/).filter((line) => /Thermal Warning Level|No thermal warning level/i.test(line)) ?? [];
-  if (thermalLines.length === 1) {
-    const match = /^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} )?Thermal Warning Level = (\d+)$/.exec(thermalLines[0].trim());
-    if (match) {
-      const level = integer(match[1]);
-      if (level >= 0) facts.thermal_warning_level = level;
-    }
-  }
-  if (facts.thermal_warning_level === undefined) facts.thermal_warning_level_issue = thermalResult.error || missing;
+  Object.assign(facts, normaliseThermal(results.thermal ?? {}));
 
   const nvmeResult = results.nvme ?? {};
   let nvme;
@@ -197,6 +210,14 @@ export function normalise(results) {
     facts.disk_issue = results.disk.error || missing;
   }
   return facts;
+}
+
+export async function collectLoadSignals() {
+  const [pressure, thermal] = await Promise.all([
+    run("/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], SHORT_TIMEOUT),
+    run("/usr/bin/pmset", ["-g", "therm"], SHORT_TIMEOUT),
+  ]);
+  return normaliseLoadSignals(pressure, thermal);
 }
 
 export async function collectFacts() {

@@ -17,6 +17,13 @@ fn expect_summary(check: Check, expected: String) {
   }
 }
 
+fn expect_load_eligibility(facts: Facts, expected: Bool) {
+  case macdry.load_test_eligible(facts) == expected {
+    True -> Nil
+    False -> panic as "Unexpected load-test eligibility"
+  }
+}
+
 fn expect_recommendations(checks: List(Check)) {
   case checks {
     [] -> Nil
@@ -79,6 +86,11 @@ pub fn main() {
   expect(power, "battery_power", "info")
   expect_summary(power, "Charge: 75%. Charger connected. Charging. ")
   expect(thermal, "thermal", "info")
+  expect_load_eligibility(facts("normal"), True)
+  expect_load_eligibility(facts("thermal_unknown"), True)
+  expect_load_eligibility(facts("thermal_10"), False)
+  expect_load_eligibility(facts("pressure_2"), False)
+  expect_load_eligibility(facts("pressure_unknown"), False)
 
   let warning_checks = macdry.checks(facts("warning"))
   let assert [_, _, _, _, _, storage, smart, battery, _, _, _] = warning_checks

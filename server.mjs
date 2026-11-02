@@ -1,11 +1,12 @@
-import { checks } from "./build/dev/javascript/macdry/macdry.mjs";
-import { collectFacts } from "./src/system.mjs";
+import { checks, load_test_eligible } from "./build/dev/javascript/macdry/macdry.mjs";
+import { collectFacts, collectLoadSignals } from "./src/system.mjs";
 
 const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/index.html", ["index.html", "text/html; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
+  ["/load-worker.js", ["load-worker.js", "text/javascript; charset=utf-8"]],
 ]);
 
 const securityHeaders = {
@@ -28,7 +29,7 @@ function sameToken(actual, expected) {
   return difference === 0;
 }
 
-export function createHandler({ port, token, readAsset, scan = collectFacts }) {
+export function createHandler({ port, token, readAsset, scan = collectFacts, loadSignals = collectLoadSignals }) {
   const host = `127.0.0.1:${port}`;
   const origin = `http://${host}`;
   let pendingScan;
@@ -48,6 +49,18 @@ export function createHandler({ port, token, readAsset, scan = collectFacts }) {
         return reply(JSON.stringify({ checks: Array.from(checks(facts)) }), 200, "application/json; charset=utf-8");
       } catch {
         return reply("Diagnostic unavailable", 500);
+      }
+    }
+    if (path === "/api/load-test/preflight") {
+      if (!sameToken(request.headers.get("x-macdry-token") ?? "", token)) return reply("Unauthorized", 401);
+      try {
+        const facts = await loadSignals();
+        const selected = Array.from(checks(facts))
+          .filter((check) => check.id === "memory_pressure" || check.id === "thermal");
+        const eligible = selected.length === 2 && load_test_eligible(facts);
+        return reply(JSON.stringify({ eligible, checks: selected }), 200, "application/json; charset=utf-8");
+      } catch {
+        return reply("Preflight unavailable", 500);
       }
     }
     const asset = assets.get(path);
@@ -73,7 +86,8 @@ Use --no-open to skip opening the browser. The URL fragment is a secret.
 Press Ctrl+C to stop the server. No data is sent externally.
 Inventory is not a hardware health test. Storage warns at 90% usage;
 battery condition and power are reported by macOS and may be unavailable.
-Memory pressure and thermal levels are snapshots, not hardware health tests.`);
+Memory pressure and thermal levels are snapshots, not hardware health tests.
+The browser offers an optional, explicitly confirmed, bounded CPU/memory/WebGL workload.`);
 }
 
 async function main() {

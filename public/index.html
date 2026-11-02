@@ -64,8 +64,9 @@
             <div class="summary-columns" aria-live="polite" aria-atomic="true">
               <div><h4>Local checks</h4><p id="summary-checks"></p></div>
               <div><h4>Guided tests</h4><p id="summary-tests"></p></div>
+              <div><h4>Controlled load test</h4><p id="summary-load-test">Not run.</p></div>
             </div>
-            <p class="summary-limit">Guided results are human responses, not proof of hardware health. No result is a complete diagnosis.</p>
+            <p class="summary-limit">Guided results are human responses, not proof of hardware health. A completed load test only reports what happened during that bounded run.</p>
           </section>
           <div id="checks-state" class="checks-state" role="status" aria-live="polite">Ready when you are. Running checks asks the local server to collect system information and may run system commands.</div>
           <div id="checks-list" class="checks-grid" aria-label="Local check results"></div>
@@ -74,9 +75,9 @@
         <section id="guided-tests" class="guided-section" aria-labelledby="guided-title">
           <div class="section-heading guided-heading">
             <div><p class="eyebrow">02 / YOUR TURN</p><h2 id="guided-title">A hands-on check<span class="title-dot">.</span></h2><p>Optional, non-destructive tests. You decide what to try and whether it worked.</p></div>
-            <span class="section-tag">6 SIMPLE TESTS <span aria-hidden="true">✳</span></span>
+            <span class="section-tag">6 GUIDED TESTS + 1 OPTIONAL LOAD TEST <span aria-hidden="true">✳</span></span>
           </div>
-          <div class="notice notice-neutral"><span class="notice-icon" aria-hidden="true">✳</span><p><strong>Good to know.</strong> These are basic browser checks, not a complete diagnosis. Intensive stress tests are not included in v1. Browser and macOS permissions may be required.</p></div>
+          <div class="notice notice-neutral"><span class="notice-icon" aria-hidden="true">✳</span><p><strong>Good to know.</strong> The optional controlled load test exercises a small part of CPU, memory and the browser graphics stack. It runs only after a local preflight and your explicit confirmation; it is not a complete diagnosis.</p></div>
 
           <div class="test-grid">
             <article class="test-card" data-test="keyboard">
@@ -137,6 +138,28 @@
               <div class="test-workspace" id="gpu-workspace" hidden><canvas id="gpu-canvas" width="480" height="160" role="img" aria-label="Graphics test: three colored blocks, coral, cream and teal"></canvas></div>
               <p class="test-note" id="gpu-message" role="status">WebGL availability depends on your browser and graphics settings.</p>
               <div class="feedback" aria-label="Graphics test result"><span>Can you see three blocks?</span><button type="button" data-feedback="pass" disabled>Yes, pass</button><button type="button" data-feedback="fail" disabled>No, fail</button></div>
+            </article>
+
+            <article class="test-card load-test-card" data-load-test>
+              <div class="test-top"><span class="test-icon icon-coral" aria-hidden="true">◌</span><span id="load-test-result" class="result-badge" data-status="not-run" role="status" aria-live="polite">Not run</span></div>
+              <h3>Controlled hardware load test</h3>
+              <p>Run a fixed, approximately 20-second CPU, 16 MiB memory and WebGL workload. MacDry makes no intentional file writes; macOS may manage or page memory normally. It stops if you leave this page, memory pressure becomes abnormal, a thermal warning appears, the graphics context is lost, or you stop it. If the thermal signal is unavailable from the outset, it stays marked unavailable and the checklist requires your manual confirmation.</p>
+              <button type="button" class="button button-secondary" id="load-preflight">Check readiness</button>
+              <p id="load-preflight-state" class="test-note" role="status">Preflight and periodic safety checks read macOS memory-pressure and thermal-warning signals. They do not read temperatures. An unavailable thermal signal is not treated as normal; the test can continue only after manual confirmation that the Mac is cool.</p>
+              <div id="load-preflight-results" class="load-preflight-results" hidden></div>
+              <label id="load-confirmation" class="load-confirmation" hidden>
+                <input type="checkbox" id="load-confirmed">
+                <span>I have saved important work, the Mac is cool and on a hard flat surface, my laptop is connected to power, and there is no recent liquid or electrical damage. I understand thermal monitoring may be unavailable and will stop if I notice unusual heat or a macOS warning.</span>
+              </label>
+              <div class="actions load-actions">
+                <button type="button" class="button button-dark" id="load-start" disabled>Run controlled test</button>
+                <button type="button" class="button button-quiet" id="load-stop" disabled>Stop now</button>
+              </div>
+              <div id="load-test-workspace" class="test-workspace" hidden>
+                <canvas id="load-canvas" width="320" height="180" aria-label="WebGL workload visualization"></canvas>
+              </div>
+              <p id="load-test-message" class="test-note" role="status">No workload starts until the preflight succeeds and you confirm the checklist.</p>
+              <p class="test-note">Limits: this checks a small memory buffer, a bounded CPU calculation and the browser graphics stack. WebGL may use software rendering; physical GPU acceleration is not verified. A normal preflight or successful run cannot certify hardware health.</p>
             </article>
           </div>
         </section>

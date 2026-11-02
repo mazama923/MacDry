@@ -1,5 +1,5 @@
 import { createHandler } from "../server.mjs";
-import { collectFacts, normalise } from "../src/system.mjs";
+import { collectFacts, collectLoadSignals, normalise, normaliseLoadSignals } from "../src/system.mjs";
 
 function equal(actual, expected) {
   if (actual !== expected) throw new Error(`Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
@@ -19,6 +19,7 @@ Deno.test("HTTP routes, token, host, origin, methods and headers", async () => {
   equal((await request("/", {})).status, 200);
   equal(await (await request("/app.js")).text(), "app.js");
   equal((await request("/style.css")).status, 200);
+  equal(await (await request("/load-worker.js")).text(), "load-worker.js");
   equal((await request("/secret")).status, 404);
   equal((await request("/server.mjs")).status, 404);
   equal((await request("/api/checks")).status, 401);
@@ -65,6 +66,81 @@ Deno.test("normalisation filters identifiers and handles alternate or missing fi
   assert(!("disk_used_percent" in broken));
   assert(!("battery_condition" in broken));
   assert(!("gpu" in broken));
+  const safeSignals = normaliseLoadSignals({ value: "1" }, { value: "Thermal Warning Level = 0" });
+  equal(safeSignals.memory_pressure_level, 1);
+  equal(safeSignals.thermal_warning_level, 0);
+  const unavailableSignals = normaliseLoadSignals({ error: "The system command timed out." }, {});
+  equal(unavailableSignals.memory_pressure_level_issue, "The system command timed out.");
+  assert(!("thermal_warning_level" in unavailableSignals));
+});
+
+Deno.test("load-test preflight is authenticated and preserves unavailable thermal signals", async () => {
+  const safeFacts = normaliseLoadSignals({ value: "1" }, { value: "Thermal Warning Level = 0" });
+  const readyHandler = createHandler({ port: 12345, token, readAsset: () => "", scan: () => ({}), loadSignals: () => safeFacts });
+  const path = `http://${host}/api/load-test/preflight`;
+  equal((await readyHandler(new Request(path, { headers: { host } }))).status, 401);
+  const readyResponse = await readyHandler(new Request(path, { headers: { host, "x-macdry-token": token } }));
+  equal(readyResponse.status, 200);
+  const ready = await readyResponse.json();
+  equal(ready.eligible, true);
+  equal(JSON.stringify(ready.checks.map(({ id, status }) => ({ id, status }))), JSON.stringify([
+    { id: "memory_pressure", status: "info" }, { id: "thermal", status: "info" },
+  ]));
+
+  const noThermalRecord = normaliseLoadSignals(
+    { value: "1" },
+    { value: "Note: No thermal warning level has been recorded" },
+  );
+  const manualThermalHandler = createHandler({
+    port: 12345,
+    token,
+    readAsset: () => "",
+    scan: () => ({}),
+    loadSignals: () => noThermalRecord,
+  });
+  const manualThermalResponse = await manualThermalHandler(new Request(path, { headers: { host, "x-macdry-token": token } }));
+  const manualThermal = await manualThermalResponse.json();
+  equal(manualThermal.eligible, true);
+  equal(manualThermal.checks.find((check) => check.id === "memory_pressure").status, "info");
+  equal(manualThermal.checks.find((check) => check.id === "thermal").status, "unavailable");
+
+  const blockedHandler = createHandler({
+    port: 12345,
+    token,
+    readAsset: () => "",
+    scan: () => ({}),
+    loadSignals: () => normaliseLoadSignals({ value: "2" }, { value: "Thermal Warning Level = 10" }),
+  });
+  const blockedResponse = await blockedHandler(new Request(path, { headers: { host, "x-macdry-token": token } }));
+  equal((await blockedResponse.json()).eligible, false);
+});
+
+Deno.test("load-test signal collection uses only fixed bounded read-only commands", async () => {
+  const original = Deno.Command;
+  const calls = [];
+  Deno.Command = class {
+    constructor(path, options) { this.path = path; this.options = options; }
+    spawn() {
+      calls.push([this.path, this.options.args]);
+      const output = this.path === "/usr/sbin/sysctl" ? "1" : "Thermal Warning Level = 0";
+      return {
+        stdout: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(output)); controller.close(); } }),
+        status: Promise.resolve({ success: true }),
+        kill() {},
+      };
+    }
+  };
+  try {
+    const signals = await collectLoadSignals();
+    equal(signals.memory_pressure_level, 1);
+    equal(signals.thermal_warning_level, 0);
+    equal(JSON.stringify(calls), JSON.stringify([
+      ["/usr/sbin/sysctl", ["-n", "kern.memorystatus_vm_pressure_level"]],
+      ["/usr/bin/pmset", ["-g", "therm"]],
+    ]));
+  } finally {
+    Deno.Command = original;
+  }
 });
 
 Deno.test("collection uses fixed commands and enforces output and timeout limits", async () => {

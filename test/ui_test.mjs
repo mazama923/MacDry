@@ -132,9 +132,9 @@ class Page {
 // graphics, download and network boundaries are replaced with deterministic fakes.
 function installMocks({ storageBlocked, storageWriteBlocked }) {
   const state = window.__test = {
-    runId: Math.random().toString(36), requests: [], responses: [], pendingRequests: [],
-    mediaCalls: [], mediaModes: [], pendingMedia: [], streams: [], audioContexts: [],
-    graphicsAvailable: true, graphicsCalls: [], downloads: [], blobs: [], revoked: [],
+    runId: Math.random().toString(36), requests: [], responses: [], preflightResponses: [], pendingRequests: [],
+    mediaCalls: [], mediaModes: [], pendingMedia: [], streams: [], audioContexts: [], workers: [], workerMessages: [], workerModes: [],
+    graphicsAvailable: true, graphicsCalls: [], downloads: [], blobs: [], revoked: [], fastGpu: false, fakeNow: 0,
     localStorageReads: 0, recorderCalls: 0,
   };
   Object.defineProperty(window, "localStorage", { configurable: true, get() { state.localStorageReads++; throw new Error("Persistent storage is forbidden"); } });
@@ -152,12 +152,41 @@ function installMocks({ storageBlocked, storageWriteBlocked }) {
   }
   window.fetch = async (url, options) => {
     state.requests.push({ url: String(url), options });
-    if (url !== "/api/checks") throw new Error("Unexpected network request");
-    let response = state.responses.shift() || { status: 200, data: { checks: [] } };
+    const isPreflight = url === "/api/load-test/preflight";
+    if (url !== "/api/checks" && !isPreflight) throw new Error("Unexpected network request");
+    const responseQueue = isPreflight ? state.preflightResponses : state.responses;
+    let response = responseQueue.shift() || (isPreflight
+      ? { status: 200, data: { eligible: true, checks: [
+        { id: "memory_pressure", status: "info", summary: "macOS reports normal memory pressure." },
+        { id: "thermal", status: "info", summary: "macOS reports a normal thermal warning level." }
+      ] } }
+      : { status: 200, data: { checks: [] } });
     if (response.deferred) response = await new Promise((resolve) => state.pendingRequests.push(resolve));
     if (response.reject) throw new Error(response.reject);
     return { ok: response.status >= 200 && response.status < 300, status: response.status, json: async () => response.data };
   };
+  window.Worker = class {
+    constructor(url) { this.url = url; this.listeners = new Map(); this.terminated = false; state.workers.push(this); }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    removeEventListener(type, listener) { if (this.listeners.get(type) === listener) this.listeners.delete(type); }
+    postMessage(message) {
+      state.workerMessages.push({ url: this.url, type: message.type });
+      if (message.type === "stop") return;
+      const mode = state.workerModes.shift() || "complete";
+      if (mode === "pending") return;
+      const status = mode === "complete" ? "no-anomaly-detected" : mode;
+      queueMicrotask(() => this.listeners.get("message")?.({ data: { type: message.type, status } }));
+    }
+    terminate() { this.terminated = true; }
+  };
+  const originalNow = performance.now.bind(performance);
+  Object.defineProperty(performance, "now", { configurable: true, value: () => state.fastGpu ? state.fakeNow : originalNow() });
+  const originalAnimationFrame = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (callback) => originalAnimationFrame((time) => {
+    if (!state.fastGpu) return callback(time);
+    state.fakeNow += 1000;
+    callback(state.fakeNow);
+  });
   const previewObjects = new WeakMap();
   Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
     configurable: true,
@@ -209,13 +238,17 @@ function installMocks({ storageBlocked, storageWriteBlocked }) {
   }
   window.AudioContext = FakeAudioContext;
   const gl = {
-    SCISSOR_TEST: 1, COLOR_BUFFER_BIT: 2,
+    SCISSOR_TEST: 1, COLOR_BUFFER_BIT: 2, VERTEX_SHADER: 3, FRAGMENT_SHADER: 4, COMPILE_STATUS: 5, LINK_STATUS: 6,
+    ARRAY_BUFFER: 7, STATIC_DRAW: 8, FLOAT: 9, TRIANGLES: 10, NO_ERROR: 0,
     isContextLost: () => false,
     viewport(...args) { state.graphicsCalls.push(["viewport", ...args]); },
     enable() {}, disable() {},
     scissor(...args) { state.graphicsCalls.push(["scissor", ...args]); },
     clearColor(...args) { state.graphicsCalls.push(["clearColor", ...args]); },
-    clear() {},
+    clear() {}, createShader: (type) => ({ type }), shaderSource() {}, compileShader() {}, getShaderParameter: () => true,
+    createProgram: () => ({}), attachShader() {}, linkProgram() {}, getProgramParameter: () => true, useProgram() {},
+    getAttribLocation: () => 0, createBuffer: () => ({}), bindBuffer() {}, bufferData() {}, enableVertexAttribArray() {},
+    vertexAttribPointer() {}, getUniformLocation: () => ({}), uniform1f() {}, drawArrays() {}, getError: () => 0, deleteBuffer() {},
   };
   HTMLCanvasElement.prototype.getContext = function () { return state.graphicsAvailable ? gl : null; };
   URL.createObjectURL = (blob) => { state.blobs.push(blob); return `blob:mock-${state.blobs.length}`; };
@@ -543,15 +576,102 @@ test("audio and graphics need user confirmation and handle unavailable WebGL", a
   assert.equal(await page.eval("document.querySelector('#gpu-workspace').hidden"), false);
 }));
 
+test("controlled load test requires normal preflight and explicit confirmation before its bounded workload", async () => usingPage({}, async (page) => {
+  assert.equal(await page.eval("__test.workers.length"), 0);
+  await page.eval(`__test.preflightResponses.push({ status: 200, data: { eligible: false, checks: [
+    { id: "memory_pressure", status: "warning", summary: "Elevated pressure" },
+    { id: "thermal", status: "info", summary: "Normal warning snapshot" }
+  ] } }); document.querySelector('#load-preflight').click()`);
+  await page.wait("document.querySelector('#load-test-result').dataset.status === 'blocked'");
+  assert.equal(await page.eval("document.querySelector('#load-start').disabled"), true);
+  assert.equal(await page.eval("__test.workers.length"), 0);
+
+  await page.eval(`__test.preflightResponses.push({ status: 200, data: { eligible: true, checks: [
+    { id: "memory_pressure", status: "info", summary: "Normal pressure" },
+    { id: "thermal", status: "unavailable", summary: "No thermal warning level was recorded." }
+  ] } }); document.querySelector('#load-preflight').click()`);
+  await page.wait("!document.querySelector('#load-confirmation').hidden");
+  assert.match(await page.eval("document.querySelector('#load-preflight-state').textContent"), /cannot monitor heat/i);
+  assert.equal(await page.eval("document.querySelector('#load-confirmed').checked"), false);
+  assert.equal(await page.eval("document.querySelector('#load-start').disabled"), true);
+  assert.equal(await page.eval("__test.workers.length"), 0);
+
+  await page.eval("__test.fastGpu = true; document.querySelector('#load-confirmed').checked = true; document.querySelector('#load-confirmed').dispatchEvent(new Event('change')); document.querySelector('#load-start').click()");
+  await page.wait("document.querySelector('#load-test-result').dataset.status === 'no-anomaly-detected'");
+  const run = await page.eval(`({ workers: __test.workers.length, messages: __test.workerMessages.map(({type}) => type), components: document.querySelector('#summary-load-test').textContent, message: document.querySelector('#load-test-message').textContent, terminated: __test.workers.every(worker => worker.terminated) })`);
+  assert.deepEqual(run.messages, ["cpu", "cpu", "memory"]);
+  assert.match(run.components, /Nothing unusual detected during this test/);
+  assert.match(run.message, /does not certify/);
+  assert.equal(run.terminated, true);
+  await page.eval("document.querySelector('#export-report').click()");
+  const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
+  assert.equal(report.hardware_load_test.status, "no-anomaly-detected");
+  assert.ok(report.hardware_load_test.duration_seconds <= 20);
+  assert.deepEqual(report.hardware_load_test.components, {
+    cpu: "no-anomaly-detected", memory: "no-anomaly-detected", gpu: "no-anomaly-detected"
+  });
+  assert.match(report.hardware_load_test.limitations, /software rendering/);
+  assert.deepEqual(report.hardware_load_test.preflight, { memory_pressure: "info", thermal: "unavailable" });
+  assert.equal(await page.eval("__test.requests.filter((request) => request.url === '/api/load-test/preflight').every((request) => request.options.headers['X-Macdry-Token'] === '" + token + "')"), true);
+}));
+
+test("a memory anomaly stops later phases and is not reported as a successful test", async () => usingPage({}, async (page) => {
+  await page.eval("__test.fastGpu = true; __test.workerModes.push('complete', 'complete', 'anomaly-detected'); document.querySelector('#load-preflight').click()");
+  await page.wait("!document.querySelector('#load-confirmation').hidden");
+  await page.eval("document.querySelector('#load-confirmed').checked = true; document.querySelector('#load-confirmed').dispatchEvent(new Event('change')); document.querySelector('#load-start').click()");
+  await page.wait("document.querySelector('#load-test-result').dataset.status === 'anomaly-detected'");
+  const result = await page.eval(`({ messages: __test.workerMessages.map(({type}) => type), components: document.querySelector('#load-test-result').dataset.status, summary: document.querySelector('#summary-load-test').textContent })`);
+  assert.deepEqual(result.messages, ["cpu", "cpu", "memory"]);
+  assert.equal(result.components, "anomaly-detected");
+  assert.match(result.summary, /An anomaly was detected/);
+  assert.equal(await page.eval("document.querySelector('#load-test-workspace').hidden"), true);
+}));
+
+test("stopping a running load test terminates its workers and records interruption", async () => usingPage({}, async (page) => {
+  await page.eval("__test.workerModes.push('pending', 'pending'); document.querySelector('#load-preflight').click()");
+  await page.wait("!document.querySelector('#load-confirmation').hidden");
+  await page.eval("document.querySelector('#load-confirmed').checked = true; document.querySelector('#load-confirmed').dispatchEvent(new Event('change')); document.querySelector('#load-start').click()");
+  await page.wait("__test.workerMessages.length === 2");
+  await page.eval("document.querySelector('#load-stop').click()");
+  await page.wait("document.querySelector('#load-test-result').dataset.status === 'interrupted'");
+  assert.equal(await page.eval("__test.workers.every(worker => worker.terminated)"), true);
+  assert.equal(await page.eval("__test.workerMessages.some(({type}) => type === 'memory')"), false);
+  assert.equal(await page.eval("document.querySelector('#load-stop').disabled"), true);
+}));
+
+test("load test stops when a live safety snapshot becomes abnormal or unavailable", async () => usingPage({}, async (page) => {
+  await page.eval(`__test.preflightResponses.push(
+    { status: 200, data: { eligible: true, checks: [
+      { id: "memory_pressure", status: "info", summary: "Normal pressure" },
+      { id: "thermal", status: "info", summary: "Normal warning snapshot" }
+    ] } },
+    { status: 200, data: { eligible: false, checks: [
+      { id: "memory_pressure", status: "warning", summary: "Elevated pressure" },
+      { id: "thermal", status: "info", summary: "Normal warning snapshot" }
+    ] } }
+  ); __test.workerModes.push('pending', 'pending'); document.querySelector('#load-preflight').click()`);
+  await page.wait("!document.querySelector('#load-confirmation').hidden");
+  await page.eval("document.querySelector('#load-confirmed').checked = true; document.querySelector('#load-confirmed').dispatchEvent(new Event('change')); document.querySelector('#load-start').click()");
+  await page.wait("document.querySelector('#load-test-result').dataset.status === 'interrupted'");
+  assert.match(await page.eval("document.querySelector('#load-test-message').textContent"), /memory pressure became abnormal/);
+  assert.equal(await page.eval("__test.workers.every(worker => worker.terminated)"), true);
+}));
+
 test("export before checks preserves their not-run state without making requests", async () => usingPage({}, async (page) => {
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
-  assert.equal(report.version, 1);
+  assert.equal(report.version, 2);
   assert.equal(report.checks_state, "not-run");
   assert.equal(report.checks, null);
   assert.equal(report.summary.checks, null);
   assert.ok(report.tests.every((item) => item.status === "not-tested" && item.recommendation));
-  assert.equal(await page.eval("__test.requests.length + __test.mediaCalls.length"), 0);
+  assert.deepEqual(report.hardware_load_test, {
+    status: "not-run", started_at: null, duration_seconds: null,
+    preflight: { memory_pressure: "not-run", thermal: "not-run" },
+    components: { cpu: "not-run", memory: "not-run", gpu: "not-run" },
+    limitations: "Preflight statuses are retained; an unavailable thermal-warning signal is not a normal reading and means MacDry cannot monitor heat. The 16 MiB memory pattern, bounded CPU calculation and WebGL workload cover only a small portion of the hardware. WebGL may use software rendering. No-anomaly-detected is not proof of hardware health."
+  });
+  assert.equal(await page.eval("__test.requests.length + __test.mediaCalls.length + __test.workers.length"), 0);
 }));
 
 test("export while media streams are active includes no device or media data", async () => usingPage({}, async (page) => {
@@ -604,9 +724,9 @@ test("download preserves filtered engine observations and recommendations while 
   assert.equal(await page.eval("__test.downloads.length"), 0);
   await page.eval("document.querySelector('#export-report').click()");
   const report = await page.eval("(async () => JSON.parse(await __test.blobs[0].text()))()");
-  assert.deepEqual(Object.keys(report), ["version", "date", "limitations", "summary", "checks_state", "checks", "tests"]);
+  assert.deepEqual(Object.keys(report), ["version", "date", "limitations", "summary", "checks_state", "checks", "tests", "hardware_load_test"]);
   assert.equal(report.checks_state, "complete");
-  assert.equal(report.version, 1);
+  assert.equal(report.version, 2);
   assert.ok(!Number.isNaN(Date.parse(report.date)));
   assert.deepEqual(report.checks.slice(0, 3), [power, thermal, pressure]);
   assert.deepEqual(report.checks[3], { id: "other-4", status: "unknown", recommendation: "Review the source and retry the local check; an unavailable or unknown result is not a diagnosis." });
